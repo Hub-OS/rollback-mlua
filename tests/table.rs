@@ -1,4 +1,4 @@
-use mlua::{Error, Lua, Nil, Result, Table, TableExt, Value};
+use rollback_mlua::{Error, Lua, Nil, Result, Table, TableExt, Value};
 
 #[test]
 fn test_set_get() -> Result<()> {

@@ -6,34 +6,19 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::{error, f32, f64, fmt};
 
-use mlua::{
-    ChunkMode, Error, ExternalError, Function, Lua, LuaOptions, Nil, Result, StdLib, String, Table,
-    UserData, Value, Variadic,
+use rollback_mlua::{
+    ChunkMode, Error, ExternalError, Function, Lua, Result, StdLib, String, Table, Value, Variadic,
 };
 
-#[cfg(not(feature = "luau"))]
 #[test]
 fn test_safety() -> Result<()> {
     let lua = Lua::new();
+
     assert!(lua.load(r#"require "debug""#).exec().is_err());
-    match lua.load_from_std_lib(StdLib::DEBUG) {
-        Err(Error::SafetyError(_)) => {}
-        Err(e) => panic!("expected SafetyError, got {:?}", e),
-        Ok(_) => panic!("expected SafetyError, got no error"),
-    }
-    drop(lua);
-
-    let lua = unsafe { Lua::unsafe_new() };
-    assert!(lua.load(r#"require "debug""#).exec().is_ok());
-    drop(lua);
-
-    match Lua::new_with(StdLib::DEBUG, LuaOptions::default()) {
-        Err(Error::SafetyError(_)) => {}
-        Err(e) => panic!("expected SafetyError, got {:?}", e),
-        Ok(_) => panic!("expected SafetyError, got new Lua state"),
-    }
 
     let lua = Lua::new();
+    lua.load_from_std_lib(StdLib::ALL_SAFE)?;
+
     match lua.load(r#"package.loadlib()"#).exec() {
         Err(Error::CallbackError { ref cause, .. }) => match cause.as_ref() {
             Error::SafetyError(_) => {}
@@ -50,7 +35,8 @@ fn test_safety() -> Result<()> {
     drop(lua);
 
     // Test safety rules after dynamically loading `package` library
-    let lua = Lua::new_with(StdLib::NONE, LuaOptions::default())?;
+    let lua = Lua::new();
+
     assert!(lua.globals().get::<_, Option<Value>>("require")?.is_none());
     lua.load_from_std_lib(StdLib::PACKAGE)?;
     match lua.load(r#"package.loadlib()"#).exec() {
@@ -73,7 +59,6 @@ fn test_load() -> Result<()> {
     let result: i32 = func.call(())?;
     assert_eq!(result, 3);
 
-    assert!(lua.load("").exec().is_ok());
     assert!(lua.load("§$%§&$%&").exec().is_err());
 
     Ok(())
@@ -138,7 +123,7 @@ fn test_eval() -> Result<()> {
 
 #[test]
 fn test_load_mode() -> Result<()> {
-    let lua = unsafe { Lua::unsafe_new() };
+    let lua = Lua::new();
 
     assert_eq!(
         lua.load("1 + 1").set_mode(ChunkMode::Text).eval::<i32>()?,
@@ -152,10 +137,7 @@ fn test_load_mode() -> Result<()> {
         Err(e) => panic!("expected SyntaxError, got {:?}", e),
     };
 
-    #[cfg(not(feature = "luau"))]
     let bytecode = lua.load("return 1 + 1").into_function()?.dump(true);
-    #[cfg(feature = "luau")]
-    let bytecode = mlua::Compiler::new().compile("return 1 + 1");
     assert_eq!(lua.load(&bytecode).eval::<i32>()?, 2);
     assert_eq!(
         lua.load(&bytecode)
@@ -242,6 +224,7 @@ fn test_error() -> Result<()> {
     impl error::Error for TestError {}
 
     let lua = Lua::new();
+    lua.load_from_std_lib(StdLib::STRING)?;
 
     let globals = lua.globals();
     lua.load(
@@ -284,6 +267,7 @@ fn test_error() -> Result<()> {
                     end
                 end
                 testvar = testvar + err
+
                 return "should be ignored"
             end
 
@@ -364,8 +348,10 @@ fn test_error() -> Result<()> {
 
 #[test]
 fn test_panic() -> Result<()> {
-    fn make_lua(options: LuaOptions) -> Result<Lua> {
-        let lua = Lua::new_with(StdLib::ALL_SAFE, options)?;
+    fn make_lua() -> Result<Lua> {
+        let lua = Lua::new();
+        lua.load_from_std_lib(StdLib::ALL_SAFE)?;
+
         let rust_panic_function =
             lua.create_function(|_, msg: Option<StdString>| -> Result<()> {
                 if let Some(msg) = msg {
@@ -378,100 +364,8 @@ fn test_panic() -> Result<()> {
         Ok(lua)
     }
 
-    // Test triggering Lua error with sending Rust panic (must be resumed)
-    {
-        let lua = make_lua(LuaOptions::default())?;
-
-        match catch_unwind(AssertUnwindSafe(|| -> Result<()> {
-            lua.load(
-                r#"
-                _, err = pcall(rust_panic_function)
-                error(err)
-            "#,
-            )
-            .exec()
-        })) {
-            Ok(Ok(_)) => panic!("no panic was detected"),
-            Ok(Err(e)) => panic!("error during panic test {:?}", e),
-            Err(p) => assert!(*p.downcast::<&str>().unwrap() == "rust panic"),
-        };
-
-        // Trigger same panic again
-        match lua.load("error(err)").exec() {
-            Ok(_) => panic!("no error was detected"),
-            Err(Error::PreviouslyResumedPanic) => {}
-            Err(e) => panic!("expected PreviouslyResumedPanic, got {:?}", e),
-        }
-    }
-
-    // Test returning Rust panic (must be resumed)
-    {
-        let lua = make_lua(LuaOptions::default())?;
-        match catch_unwind(AssertUnwindSafe(|| -> Result<()> {
-            let _catched_panic = lua
-                .load(
-                    r#"
-                    -- Set global
-                    _, err = pcall(rust_panic_function)
-                    return err
-                "#,
-                )
-                .eval::<Value>()?;
-            Ok(())
-        })) {
-            Ok(_) => panic!("no panic was detected"),
-            Err(_) => {}
-        };
-
-        assert!(lua.globals().get::<_, Value>("err")? == Value::Nil);
-        match lua.load("tostring(err)").exec() {
-            Ok(_) => panic!("no error was detected"),
-            Err(Error::CallbackError { ref cause, .. }) => match cause.as_ref() {
-                Error::PreviouslyResumedPanic => {}
-                e => panic!("expected PreviouslyResumedPanic, got {:?}", e),
-            },
-            Err(e) => panic!("expected CallbackError, got {:?}", e),
-        }
-    }
-
-    // Test representing Rust panic as a string
     match catch_unwind(|| -> Result<()> {
-        let lua = make_lua(LuaOptions::default())?;
-        lua.load(
-            r#"
-            local _, err = pcall(rust_panic_function)
-            error(tostring(err))
-        "#,
-        )
-        .exec()
-    }) {
-        Ok(Ok(_)) => panic!("no error was detected"),
-        Ok(Err(Error::RuntimeError(_))) => {}
-        Ok(Err(e)) => panic!("expected RuntimeError, got {:?}", e),
-        Err(_) => panic!("panic was detected"),
-    }
-
-    // Test disabling `catch_rust_panics` option / pcall correctness
-    match catch_unwind(|| -> Result<()> {
-        let lua = make_lua(LuaOptions::new().catch_rust_panics(false))?;
-        lua.load(
-            r#"
-            local ok, err = pcall(function(msg) error(msg) end, "hello")
-            assert(not ok and err:find("hello") ~= nil)
-
-            ok, err = pcall(rust_panic_function, "rust panic from lua")
-            -- Nothing to return, panic should be automatically resumed
-        "#,
-        )
-        .exec()
-    }) {
-        Ok(r) => panic!("no panic was detected: {:?}", r),
-        Err(p) => assert!(*p.downcast::<StdString>().unwrap() == "rust panic from lua"),
-    }
-
-    // Test disabling `catch_rust_panics` option / xpcall correctness
-    match catch_unwind(|| -> Result<()> {
-        let lua = make_lua(LuaOptions::new().catch_rust_panics(false))?;
+        let lua = make_lua()?;
         lua.load(
             r#"
             local msgh_ok = false
@@ -499,6 +393,8 @@ fn test_panic() -> Result<()> {
 #[test]
 fn test_result_conversions() -> Result<()> {
     let lua = Lua::new();
+    lua.load_from_std_lib(StdLib::STRING)?;
+
     let globals = lua.globals();
 
     let err = lua.create_function(|_, ()| {
@@ -561,12 +457,7 @@ fn test_num_conversion() -> Result<()> {
     assert_eq!(lua.load("1.0").eval::<f64>()?, 1.0);
     #[cfg(any(feature = "lua54", feature = "lua53"))]
     assert_eq!(lua.load("1.0").eval::<String>()?, "1.0");
-    #[cfg(any(
-        feature = "lua52",
-        feature = "lua51",
-        feature = "luajit",
-        feature = "luau"
-    ))]
+    #[cfg(any(feature = "lua52", feature = "lua51",))]
     assert_eq!(lua.load("1.0").eval::<String>()?, "1");
 
     assert_eq!(lua.load("1.5").eval::<i64>()?, 1);
@@ -676,41 +567,6 @@ fn test_pcall_xpcall() -> Result<()> {
 }
 
 #[test]
-fn test_recursive_mut_callback_error() -> Result<()> {
-    let lua = Lua::new();
-
-    let mut v = Some(Box::new(123));
-    let f = lua.create_function_mut::<_, (), _>(move |lua, mutate: bool| {
-        if mutate {
-            v = None;
-        } else {
-            // Produce a mutable reference
-            let r = v.as_mut().unwrap();
-            // Whoops, this will recurse into the function and produce another mutable reference!
-            lua.globals().get::<_, Function>("f")?.call::<_, ()>(true)?;
-            println!("Should not get here, mutable aliasing has occurred!");
-            println!("value at {:p}", r as *mut _);
-            println!("value is {}", r);
-        }
-
-        Ok(())
-    })?;
-    lua.globals().set("f", f)?;
-    match lua.globals().get::<_, Function>("f")?.call::<_, ()>(false) {
-        Err(Error::CallbackError { ref cause, .. }) => match *cause.as_ref() {
-            Error::CallbackError { ref cause, .. } => match *cause.as_ref() {
-                Error::RecursiveMutCallback { .. } => {}
-                ref other => panic!("incorrect result: {:?}", other),
-            },
-            ref other => panic!("incorrect result: {:?}", other),
-        },
-        other => panic!("incorrect result: {:?}", other),
-    };
-
-    Ok(())
-}
-
-#[test]
 fn test_set_metatable_nil() -> Result<()> {
     let lua = Lua::new();
     lua.load(
@@ -737,51 +593,9 @@ fn test_named_registry_value() -> Result<()> {
 
     lua.unset_named_registry_value("test")?;
     match lua.named_registry_value("test")? {
-        Nil => {}
+        Value::Nil => {}
         val => panic!("registry value was not Nil, was {:?}", val),
     };
-
-    Ok(())
-}
-
-#[test]
-fn test_registry_value() -> Result<()> {
-    let lua = Lua::new();
-
-    let mut r = Some(lua.create_registry_value::<i32>(42)?);
-    let f = lua.create_function_mut(move |lua, ()| {
-        if let Some(r) = r.take() {
-            assert_eq!(lua.registry_value::<i32>(&r)?, 42);
-            lua.remove_registry_value(r).unwrap();
-        } else {
-            panic!();
-        }
-        Ok(())
-    })?;
-
-    f.call::<_, ()>(())?;
-
-    Ok(())
-}
-
-#[test]
-fn test_drop_registry_value() -> Result<()> {
-    struct MyUserdata(Arc<()>);
-
-    impl UserData for MyUserdata {}
-
-    let lua = Lua::new();
-    let rc = Arc::new(());
-
-    let r = lua.create_registry_value(MyUserdata(rc.clone()))?;
-    assert_eq!(Arc::strong_count(&rc), 2);
-
-    drop(r);
-    lua.expire_registry_values();
-
-    lua.load(r#"collectgarbage("collect")"#).exec()?;
-
-    assert_eq!(Arc::strong_count(&rc), 1);
 
     Ok(())
 }
@@ -845,37 +659,6 @@ fn test_mismatched_registry_key() -> Result<()> {
 }
 
 #[test]
-fn test_application_data() -> Result<()> {
-    let lua = Lua::new();
-
-    lua.set_app_data("test1");
-    lua.set_app_data(vec!["test2"]);
-
-    let f = lua.create_function(|lua, ()| {
-        {
-            let data1 = lua.app_data_ref::<&str>().unwrap();
-            assert_eq!(*data1, "test1");
-        }
-        let mut data2 = lua.app_data_mut::<Vec<&str>>().unwrap();
-        assert_eq!(*data2, vec!["test2"]);
-        data2.push("test3");
-        Ok(())
-    })?;
-    f.call(())?;
-
-    assert_eq!(*lua.app_data_ref::<&str>().unwrap(), "test1");
-    assert_eq!(
-        *lua.app_data_ref::<Vec<&str>>().unwrap(),
-        vec!["test2", "test3"]
-    );
-
-    lua.remove_app_data::<Vec<&str>>();
-    assert!(matches!(lua.app_data_ref::<Vec<&str>>(), None));
-
-    Ok(())
-}
-
-#[test]
 fn test_recursion() -> Result<()> {
     let lua = Lua::new();
 
@@ -916,7 +699,6 @@ fn test_too_many_arguments() -> Result<()> {
 }
 
 #[test]
-#[cfg(not(feature = "luajit"))]
 fn test_too_many_recursions() -> Result<()> {
     let lua = Lua::new();
 
@@ -1062,66 +844,38 @@ fn test_chunk_env() -> Result<()> {
 }
 
 #[test]
-fn test_context_thread() -> Result<()> {
+fn test_environment() -> Result<()> {
     let lua = Lua::new();
 
-    let f = lua
-        .load(
-            r#"
-            local thread = ...
-            assert(coroutine.running() == thread)
-        "#,
-        )
-        .into_function()?;
+    let test_0 = lua.create_function(|lua, _: ()| {
+        let env_table = lua.environment()?;
 
-    #[cfg(any(
-        feature = "lua54",
-        feature = "lua53",
-        feature = "lua52",
-        feature = "luajit52"
-    ))]
-    f.call::<_, ()>(lua.current_thread())?;
+        assert_eq!(env_table.get::<_, i32>("value")?, 0);
 
-    #[cfg(any(
-        feature = "lua51",
-        all(feature = "luajit", not(feature = "luajit52")),
-        feature = "luau"
-    ))]
-    f.call::<_, ()>(Nil)?;
+        Ok(())
+    })?;
 
-    Ok(())
-}
+    let test_1 = lua.create_function(|lua, _: ()| {
+        let env_table = lua.environment()?;
 
-#[test]
-#[cfg(any(feature = "lua51", all(feature = "luajit", not(feature = "luajit52"))))]
-fn test_context_thread_51() -> Result<()> {
-    let lua = Lua::new();
+        assert_eq!(env_table.get::<_, i32>("value")?, 1);
 
-    let thread = lua.create_thread(
-        lua.load(
-            r#"
-                function (thread)
-                    assert(coroutine.running() == thread)
-                end
-            "#,
-        )
-        .eval()?,
-    )?;
+        Ok(())
+    })?;
 
-    thread.resume::<_, ()>(thread.clone())?;
+    lua.globals().set("value", 0)?;
+    lua.globals().set("test", test_0)?;
 
-    Ok(())
-}
+    // global env
+    lua.load("test()").exec()?;
 
-#[test]
-#[cfg(feature = "luajit")]
-fn test_jit_version() -> Result<()> {
-    let lua = Lua::new();
-    let jit: Table = lua.globals().get("jit")?;
-    assert!(jit
-        .get::<_, String>("version")?
-        .to_str()?
-        .contains("LuaJIT"));
+    // env
+    let env = lua.create_table()?;
+    env.set("value", 1)?;
+    env.set("test", test_1)?;
+
+    lua.load("test()").set_environment(env)?.exec()?;
+
     Ok(())
 }
 
@@ -1160,132 +914,22 @@ fn test_load_from_function() -> Result<()> {
     Ok(())
 }
 
-#[test]
-fn test_inspect_stack() -> Result<()> {
-    let lua = Lua::new();
+// #[test]
+// fn test_multi_states() -> Result<()> {
+//     let lua = Lua::new();
+//     lua.load_from_std_lib(StdLib::COROUTINE)?;
 
-    // Not inside any function
-    assert!(lua.inspect_stack(0).is_none());
+//     let f = lua.create_function(|_, g: Option<Function>| {
+//         println!("a");
+//         if let Some(g) = g {
+//             g.call(())?;
+//         }
+//         Ok(())
+//     })?;
+//     lua.globals().set("f", f)?;
 
-    let logline = lua.create_function(|lua, msg: StdString| {
-        let debug = lua.inspect_stack(1).unwrap(); // caller
-        let source = debug.source().short_src.map(core::str::from_utf8);
-        let source = source.transpose().unwrap().unwrap_or("?");
-        let line = debug.curr_line();
-        Ok(format!("{}:{} {}", source, line, msg))
-    })?;
-    lua.globals().set("logline", logline)?;
+//     lua.load("f(function() coroutine.wrap(function() f() end)() end)")
+//         .exec()?;
 
-    lua.load(
-        r#"
-        local function foo()
-            local line = logline("hello")
-            return line
-        end
-        local function bar()
-            return foo()
-        end
-
-        assert(foo() == '[string "chunk"]:3 hello')
-        assert(bar() == '[string "chunk"]:3 hello')
-        assert(logline("world") == '[string "chunk"]:12 world')
-    "#,
-    )
-    .set_name("chunk")?
-    .exec()?;
-
-    Ok(())
-}
-
-#[test]
-fn test_multi_states() -> Result<()> {
-    let lua = Lua::new();
-
-    let f = lua.create_function(|_, g: Option<Function>| {
-        if let Some(g) = g {
-            g.call(())?;
-        }
-        Ok(())
-    })?;
-    lua.globals().set("f", f)?;
-
-    lua.load("f(function() coroutine.wrap(function() f() end)() end)")
-        .exec()?;
-
-    Ok(())
-}
-
-#[test]
-#[cfg(feature = "lua54")]
-fn test_warnings() -> Result<()> {
-    let lua = Lua::new();
-    lua.set_app_data::<Vec<(StdString, bool)>>(Vec::new());
-
-    lua.set_warning_function(|lua, msg, tocont| {
-        let msg = msg.to_string_lossy().to_string();
-        lua.app_data_mut::<Vec<(StdString, bool)>>()
-            .unwrap()
-            .push((msg, tocont));
-        Ok(())
-    });
-
-    lua.warning("native warning ...", true)?;
-    lua.warning("finish", false)?;
-    lua.load(r#"warn("lua warning", "continue")"#).exec()?;
-
-    lua.remove_warning_function();
-    lua.warning("one more warning", false)?;
-
-    let messages = lua.app_data_ref::<Vec<(StdString, bool)>>().unwrap();
-    assert_eq!(
-        *messages,
-        vec![
-            ("native warning ...".to_string(), true),
-            ("finish".to_string(), false),
-            ("lua warning".to_string(), true),
-            ("continue".to_string(), false),
-        ]
-    );
-
-    // Trigger error inside warning
-    lua.set_warning_function(|_, _, _| Err(Error::RuntimeError("warning error".to_string())));
-    assert!(matches!(
-        lua.load(r#"warn("test")"#).exec(),
-        Err(Error::CallbackError { cause, .. })
-            if matches!(*cause, Error::RuntimeError(ref err) if err == "warning error")
-    ));
-
-    Ok(())
-}
-
-#[test]
-#[cfg(feature = "luajit")]
-#[should_panic]
-fn test_luajit_cdata() {
-    let lua = unsafe { Lua::unsafe_new() };
-    let _v: Result<Value> = lua
-        .load(
-            r#"
-        local ffi = require("ffi")
-        ffi.cdef[[
-            void *malloc(size_t size);
-            void free(void *ptr);
-        ]]
-        local ptr = ffi.C.malloc(1)
-        ffi.C.free(ptr)
-        return ptr
-    "#,
-        )
-        .eval();
-}
-
-#[test]
-#[cfg(feature = "send")]
-fn test_send() {
-    let lua = Lua::new();
-    std::thread::spawn(move || {
-        let _lua = lua;
-    })
-    .join()
-    .unwrap();
-}
+//     Ok(())
+// }

@@ -5,14 +5,9 @@ use std::slice;
 
 use crate::error::{Error, Result};
 use crate::ffi;
-use crate::types::LuaRef;
-use crate::util::{
-    assert_stack, check_stack, error_traceback, pop_error, ptr_to_cstr_bytes, StackGuard,
-};
+use crate::lua_ref::LuaRef;
+use crate::util::{check_stack, error_traceback, pop_error, ptr_to_cstr_bytes, StackGuard};
 use crate::value::{FromLuaMulti, ToLuaMulti};
-
-#[cfg(feature = "async")]
-use {futures_core::future::LocalBoxFuture, futures_util::future};
 
 /// Handle to an internal Lua function.
 #[derive(Clone, Debug)]
@@ -26,19 +21,7 @@ pub struct FunctionInfo {
     pub source: Option<Vec<u8>>,
     pub short_src: Option<Vec<u8>>,
     pub line_defined: i32,
-    #[cfg(not(feature = "luau"))]
     pub last_line_defined: i32,
-}
-
-/// Luau function coverage snapshot.
-#[cfg(any(feature = "luau", doc))]
-#[cfg_attr(docsrs, doc(cfg(feature = "luau")))]
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CoverageInfo {
-    pub function: Option<std::string::String>,
-    pub line_defined: i32,
-    pub depth: i32,
-    pub hits: Vec<i32>,
 }
 
 impl<'lua> Function<'lua> {
@@ -51,7 +34,7 @@ impl<'lua> Function<'lua> {
     /// Call Lua's built-in `tostring` function:
     ///
     /// ```
-    /// # use mlua::{Function, Lua, Result};
+    /// # use rollback_mlua::{Function, Lua, Result};
     /// # fn main() -> Result<()> {
     /// # let lua = Lua::new();
     /// let globals = lua.globals();
@@ -67,7 +50,7 @@ impl<'lua> Function<'lua> {
     /// Call a function with multiple arguments:
     ///
     /// ```
-    /// # use mlua::{Function, Lua, Result};
+    /// # use rollback_mlua::{Function, Lua, Result};
     /// # fn main() -> Result<()> {
     /// # let lua = Lua::new();
     /// let sum: Function = lua.load(
@@ -91,6 +74,7 @@ impl<'lua> Function<'lua> {
         let results = unsafe {
             let _sg = StackGuard::new(lua.state);
             check_stack(lua.state, nargs + 3)?;
+            check_stack(lua.ref_thread, 1)?;
 
             ffi::lua_pushcfunction(lua.state, error_traceback);
             let stack_start = ffi::lua_gettop(lua.state);
@@ -104,7 +88,7 @@ impl<'lua> Function<'lua> {
             }
             let nresults = ffi::lua_gettop(lua.state) - stack_start;
             let mut results = args; // Reuse MultiValue container
-            assert_stack(lua.state, 2);
+            check_stack(lua.state, 2)?;
             for _ in 0..nresults {
                 results.push_front(lua.pop_value());
             }
@@ -112,54 +96,6 @@ impl<'lua> Function<'lua> {
             results
         };
         R::from_lua_multi(results, lua)
-    }
-
-    /// Returns a future that, when polled, calls `self`, passing `args` as function arguments,
-    /// and drives the execution.
-    ///
-    /// Internally it wraps the function to an [`AsyncThread`].
-    ///
-    /// Requires `feature = "async"`
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use std::time::Duration;
-    /// use futures_timer::Delay;
-    /// # use mlua::{Lua, Result};
-    /// # #[tokio::main]
-    /// # async fn main() -> Result<()> {
-    /// # let lua = Lua::new();
-    ///
-    /// let sleep = lua.create_async_function(move |_lua, n: u64| async move {
-    ///     Delay::new(Duration::from_millis(n)).await;
-    ///     Ok(())
-    /// })?;
-    ///
-    /// sleep.call_async(10).await?;
-    ///
-    /// # Ok(())
-    /// # }
-    /// ```
-    ///
-    /// [`AsyncThread`]: crate::AsyncThread
-    #[cfg(feature = "async")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "async")))]
-    pub fn call_async<'fut, A, R>(&self, args: A) -> LocalBoxFuture<'fut, Result<R>>
-    where
-        'lua: 'fut,
-        A: ToLuaMulti<'lua>,
-        R: FromLuaMulti<'lua> + 'fut,
-    {
-        let lua = self.0.lua;
-        match lua.create_recycled_thread(self.clone()) {
-            Ok(t) => {
-                let mut t = t.into_async(args);
-                t.set_recyclable(true);
-                Box::pin(t)
-            }
-            Err(e) => Box::pin(future::err(e)),
-        }
     }
 
     /// Returns a function that, when called, calls `self`, passing `args` as the first set of
@@ -170,7 +106,7 @@ impl<'lua> Function<'lua> {
     /// # Examples
     ///
     /// ```
-    /// # use mlua::{Function, Lua, Result};
+    /// # use rollback_mlua::{Function, Lua, Result};
     /// # fn main() -> Result<()> {
     /// # let lua = Lua::new();
     /// let sum: Function = lua.load(
@@ -233,17 +169,9 @@ impl<'lua> Function<'lua> {
             Function(lua.pop_ref())
         };
 
-        lua.load(
-            r#"
-            local func, args_wrapper = ...
-            return function(...)
-                return func(args_wrapper(...))
-            end
-            "#,
-        )
-        .try_cache()
-        .set_name("_mlua_bind")?
-        .call((self.clone(), args_wrapper))
+        lua.load(&lua.compiled_bind_func)
+            .set_name("_mlua_bind")?
+            .call((self.clone(), args_wrapper))
     }
 
     /// Returns information about the function.
@@ -255,31 +183,21 @@ impl<'lua> Function<'lua> {
         let lua = self.0.lua;
         unsafe {
             let _sg = StackGuard::new(lua.state);
-            assert_stack(lua.state, 1);
+            check_stack(lua.state, 1).unwrap();
 
             let mut ar: ffi::lua_Debug = mem::zeroed();
             lua.push_ref(&self.0);
-            #[cfg(not(feature = "luau"))]
             let res = ffi::lua_getinfo(lua.state, cstr!(">Sn"), &mut ar);
-            #[cfg(feature = "luau")]
-            let res = ffi::lua_getinfo(lua.state, -1, cstr!("sn"), &mut ar);
-            mlua_assert!(res != 0, "lua_getinfo failed with `>Sn`");
+            assert!(res != 0, "lua_getinfo failed with `>Sn`");
 
             FunctionInfo {
                 name: ptr_to_cstr_bytes(ar.name).map(|s| s.to_vec()),
-                #[cfg(not(feature = "luau"))]
                 name_what: ptr_to_cstr_bytes(ar.namewhat).map(|s| s.to_vec()),
-                #[cfg(feature = "luau")]
-                name_what: None,
                 what: ptr_to_cstr_bytes(ar.what).map(|s| s.to_vec()),
                 source: ptr_to_cstr_bytes(ar.source).map(|s| s.to_vec()),
-                #[cfg(not(feature = "luau"))]
-                short_src: ptr_to_cstr_bytes(ar.short_src.as_ptr()).map(|s| s.to_vec()),
-                #[cfg(feature = "luau")]
-                short_src: ptr_to_cstr_bytes(ar.short_src).map(|s| s.to_vec()),
-                line_defined: ar.linedefined,
-                #[cfg(not(feature = "luau"))]
-                last_line_defined: ar.lastlinedefined,
+                short_src: ptr_to_cstr_bytes(&ar.short_src as *const _).map(|s| s.to_vec()),
+                line_defined: ar.linedefined as i32,
+                last_line_defined: ar.lastlinedefined as i32,
             }
         }
     }
@@ -292,8 +210,6 @@ impl<'lua> Function<'lua> {
     /// For Luau a [Compiler] can be used to compile Lua chunks to bytecode.
     ///
     /// [Compiler]: crate::chunk::Compiler
-    #[cfg(not(feature = "luau"))]
-    #[cfg_attr(docsrs, doc(cfg(not(feature = "luau"))))]
     pub fn dump(&self, strip: bool) -> Vec<u8> {
         unsafe extern "C" fn writer(
             _state: *mut ffi::lua_State,
@@ -311,67 +227,16 @@ impl<'lua> Function<'lua> {
         let mut data: Vec<u8> = Vec::new();
         unsafe {
             let _sg = StackGuard::new(lua.state);
-            assert_stack(lua.state, 1);
+            check_stack(lua.state, 1).unwrap();
 
             lua.push_ref(&self.0);
             let data_ptr = &mut data as *mut Vec<u8> as *mut c_void;
-            ffi::lua_dump(lua.state, writer, data_ptr, strip as i32);
+            let strip = if strip { 1 } else { 0 };
+            ffi::lua_dump(lua.state, writer, data_ptr, strip);
             ffi::lua_pop(lua.state, 1);
         }
 
         data
-    }
-
-    /// Retrieves recorded coverage information about this Lua function including inner calls.
-    ///
-    /// This function takes a callback as an argument and calls it providing [`CoverageInfo`] snapshot
-    /// per each executed inner function.
-    ///
-    /// Recording of coverage information is controlled by [`Compiler::set_coverage_level`] option.
-    ///
-    /// Requires `feature = "luau"`
-    ///
-    /// [`Compiler::set_coverage_level`]: crate::chunk::Compiler::set_coverage_level
-    #[cfg(any(feature = "luau", docsrs))]
-    #[cfg_attr(docsrs, doc(cfg(feature = "luau")))]
-    pub fn coverage<F>(&self, mut func: F)
-    where
-        F: FnMut(CoverageInfo),
-    {
-        use std::ffi::CStr;
-        use std::os::raw::c_char;
-
-        unsafe extern "C" fn callback<F: FnMut(CoverageInfo)>(
-            data: *mut c_void,
-            function: *const c_char,
-            line_defined: c_int,
-            depth: c_int,
-            hits: *const c_int,
-            size: usize,
-        ) {
-            let function = if !function.is_null() {
-                Some(CStr::from_ptr(function).to_string_lossy().to_string())
-            } else {
-                None
-            };
-            let rust_callback = &mut *(data as *mut F);
-            rust_callback(CoverageInfo {
-                function,
-                line_defined,
-                depth,
-                hits: slice::from_raw_parts(hits, size).to_vec(),
-            });
-        }
-
-        let lua = self.0.lua;
-        unsafe {
-            let _sg = StackGuard::new(lua.state);
-            assert_stack(lua.state, 1);
-
-            lua.push_ref(&self.0);
-            let func_ptr = &mut func as *mut F as *mut c_void;
-            ffi::lua_getcoverage(lua.state, -1, func_ptr, callback::<F>);
-        }
     }
 }
 

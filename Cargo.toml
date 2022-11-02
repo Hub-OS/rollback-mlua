@@ -1,108 +1,43 @@
 [package]
-name = "mlua"
-version = "0.8.5" # remember to update html_root_url and mlua_derive
-authors = ["Aleksandr Orlenko <zxteam@pm.me>", "kyren <catherine@chucklefish.org>"]
+name = "rollback_mlua"
+version = "0.1.0"
 edition = "2021"
-repository = "https://github.com/khvzak/mlua"
-documentation = "https://docs.rs/mlua"
-readme = "README.md"
-keywords = ["lua", "luajit", "luau", "async", "scripting"]
-categories = ["api-bindings", "asynchronous"]
 license = "MIT"
-links = "lua"
 build = "build/main.rs"
-description = """
-High level bindings to Lua 5.4/5.3/5.2/5.1 (including LuaJIT) and Roblox Luau
-with async/await features and support of writing native Lua modules in Rust.
-"""
 
-[package.metadata.docs.rs]
-features = ["lua54", "vendored", "async", "send", "serialize", "macros", "parking_lot"]
-rustdoc-args = ["--cfg", "docsrs"]
+[dependencies]
+bstr = "0.2.17"
+log = "0.4.17"
+num-traits = "0.2.15"
+once_cell = "1.13.0"
+rustc-hash = "1.1.0"
+serde = { version = "1.0", optional = true }
+erased-serde = { version = "0.3", optional = true }
+generational-arena = "0.2.8"
 
-[workspace]
-members = [
-    "mlua_derive",
-]
+[build-dependencies]
+cc = { version = "1.0" }
+pkg-config = { version = "0.3.17" }
+lua-src = { version = ">= 544.0.0, < 550.0.0", optional = true }
 
 [features]
 lua54 = []
 lua53 = []
 lua52 = []
 lua51 = []
-luajit = []
-luajit52 = ["luajit"]
-luau = ["luau0-src"]
-vendored = ["lua-src", "luajit-src"]
-module = ["mlua_derive"]
-async = ["futures-core", "futures-task", "futures-util"]
-send = []
+vendored = ["lua-src"]
 serialize = ["serde", "erased-serde"]
-macros = ["mlua_derive/macros"]
-
-[dependencies]
-mlua_derive = { version = "=0.8.0", optional = true, path = "mlua_derive" }
-bstr = { version = "0.2", features = ["std"], default_features = false }
-once_cell = { version = "1.0" }
-num-traits = { version = "0.2.14" }
-rustc-hash = "1.0"
-futures-core = { version = "0.3.5", optional = true }
-futures-task = { version = "0.3.5", optional = true }
-futures-util = { version = "0.3.5", optional = true }
-serde = { version = "1.0", optional = true }
-erased-serde = { version = "0.3", optional = true }
-parking_lot = { version = "0.12", optional = true }
-
-[build-dependencies]
-cc = { version = "1.0" }
-pkg-config = { version = "0.3.17" }
-lua-src = { version = ">= 544.0.0, < 550.0.0", optional = true }
-luajit-src = { version = ">= 210.4.0, < 220.0.0", optional = true }
-luau0-src = { version = "0.4.0", optional = true }
+default = ["lua54", "vendored", "serialize"]
 
 [dev-dependencies]
-rustyline = "10.0"
-criterion = { version = "0.3.4", features = ["html_reports", "async_tokio"] }
+tempfile = "3"
 trybuild = "1.0"
-futures = "0.3.5"
-hyper = { version = "0.14", features = ["client", "server"] }
-reqwest = { version = "0.11", features = ["json"] }
-tokio = { version = "1.0", features = ["full"] }
-futures-timer = "3.0"
+maplit = "1.0"
+criterion = { version = "0.3.4", features = ["html_reports"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-maplit = "1.0"
-tempfile = "3"
 
 [[bench]]
 name = "benchmark"
 harness = false
-required-features = ["async"]
-
-[[example]]
-name = "async_http_client"
-required-features = ["async", "macros"]
-
-[[example]]
-name = "async_http_reqwest"
-required-features = ["async", "serialize", "macros"]
-
-[[example]]
-name = "async_http_server"
-required-features = ["async", "macros"]
-
-[[example]]
-name = "async_tcp_server"
-required-features = ["async", "macros"]
-
-[[example]]
-name = "guided_tour"
-required-features = ["macros"]
-
-[[example]]
-name = "serialize"
-required-features = ["serialize"]
-
-[[example]]
-name = "userdata"
-required-features = ["macros"]
+required-features = []

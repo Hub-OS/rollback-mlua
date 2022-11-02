@@ -1,13 +1,36 @@
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use std::time::Duration;
-use tokio::runtime::Runtime;
-use tokio::task;
 
-use mlua::prelude::*;
+use rollback_mlua::prelude::*;
+
+const ROLLBACK_VM_MEMORY: usize = 1 * 1024 * 1024; // 1 MiB
 
 fn collect_gc_twice(lua: &Lua) {
     lua.gc_collect().unwrap();
     lua.gc_collect().unwrap();
+}
+
+fn snapshots(c: &mut Criterion) {
+    let mut lua = Lua::new_rollback(ROLLBACK_VM_MEMORY, 5);
+
+    c.bench_function("snapshot", |b| {
+        b.iter(|| {
+            lua.globals();
+            lua.snap()
+        });
+    });
+}
+
+fn rollback(c: &mut Criterion) {
+    let mut lua = Lua::new_rollback(ROLLBACK_VM_MEMORY, 5);
+    lua.snap();
+
+    c.bench_function("rollback", |b| {
+        b.iter(|| {
+            lua.globals();
+            lua.rollback(1)
+        });
+    });
 }
 
 fn create_table(c: &mut Criterion) {
@@ -119,34 +142,6 @@ fn call_sum_callback(c: &mut Criterion) {
     });
 }
 
-fn call_async_sum_callback(c: &mut Criterion) {
-    let options = LuaOptions::new().thread_cache_size(1024);
-    let lua = Lua::new_with(LuaStdLib::ALL_SAFE, options).unwrap();
-    let callback = lua
-        .create_async_function(|_, (a, b, c): (i64, i64, i64)| async move {
-            task::yield_now().await;
-            Ok(a + b + c)
-        })
-        .unwrap();
-    lua.globals().set("callback", callback).unwrap();
-
-    c.bench_function("call async Rust callback [sum] 3 10", |b| {
-        let rt = Runtime::new().unwrap();
-        b.to_async(rt).iter_batched(
-            || {
-                collect_gc_twice(&lua);
-                lua.load("function() for i = 1,10 do callback(i, i+1, i+2) end end")
-                    .eval::<LuaFunction>()
-                    .unwrap()
-            },
-            |function| async move {
-                function.call_async::<_, ()>(()).await.unwrap();
-            },
-            BatchSize::SmallInput,
-        );
-    });
-}
-
 fn call_concat_callback(c: &mut Criterion) {
     let lua = Lua::new();
     let callback = lua
@@ -189,110 +184,6 @@ fn create_registry_values(c: &mut Criterion) {
     });
 }
 
-fn create_userdata(c: &mut Criterion) {
-    struct UserData(i64);
-    impl LuaUserData for UserData {}
-
-    let lua = Lua::new();
-
-    c.bench_function("create [table userdata] 10", |b| {
-        b.iter_batched(
-            || collect_gc_twice(&lua),
-            |_| {
-                let table: LuaTable = lua.create_table().unwrap();
-                for i in 1..11 {
-                    table.set(i, UserData(i)).unwrap();
-                }
-            },
-            BatchSize::SmallInput,
-        );
-    });
-}
-
-fn call_userdata_index(c: &mut Criterion) {
-    struct UserData(i64);
-    impl LuaUserData for UserData {
-        fn add_methods<'lua, M: LuaUserDataMethods<'lua, Self>>(methods: &mut M) {
-            methods.add_meta_method(LuaMetaMethod::Index, move |_, _, index: String| Ok(index));
-        }
-    }
-
-    let lua = Lua::new();
-    lua.globals().set("userdata", UserData(10)).unwrap();
-
-    c.bench_function("call [userdata index] 10", |b| {
-        b.iter_batched_ref(
-            || {
-                collect_gc_twice(&lua);
-                lua.load("function() for i = 1,10 do local v = userdata.test end end")
-                    .eval::<LuaFunction>()
-                    .unwrap()
-            },
-            |function| {
-                function.call::<_, ()>(()).unwrap();
-            },
-            BatchSize::SmallInput,
-        );
-    });
-}
-
-fn call_userdata_method(c: &mut Criterion) {
-    struct UserData(i64);
-    impl LuaUserData for UserData {
-        fn add_methods<'lua, M: LuaUserDataMethods<'lua, Self>>(methods: &mut M) {
-            methods.add_method("method", |_, this, ()| Ok(this.0));
-        }
-    }
-
-    let lua = Lua::new();
-    lua.globals().set("userdata", UserData(10)).unwrap();
-
-    c.bench_function("call [userdata method] 10", |b| {
-        b.iter_batched_ref(
-            || {
-                collect_gc_twice(&lua);
-                lua.load("function() for i = 1,10 do userdata:method() end end")
-                    .eval::<LuaFunction>()
-                    .unwrap()
-            },
-            |function| {
-                function.call::<_, ()>(()).unwrap();
-            },
-            BatchSize::SmallInput,
-        );
-    });
-}
-
-fn call_async_userdata_method(c: &mut Criterion) {
-    #[derive(Clone, Copy)]
-    struct UserData(i64);
-    impl LuaUserData for UserData {
-        fn add_methods<'lua, M: LuaUserDataMethods<'lua, Self>>(methods: &mut M) {
-            methods.add_async_method("method", |_, this, ()| async move { Ok(this.0) });
-        }
-    }
-
-    let options = LuaOptions::new().thread_cache_size(1024);
-    let lua = Lua::new_with(LuaStdLib::ALL_SAFE, options).unwrap();
-    lua.globals().set("userdata", UserData(10)).unwrap();
-
-    c.bench_function("call async [userdata method] 10", |b| {
-        let rt = Runtime::new().unwrap();
-        b.to_async(rt).iter_batched(
-            || {
-                collect_gc_twice(&lua);
-                lua.load("function() for i = 1,10 do userdata:method() end end")
-                    .eval::<LuaFunction>()
-                    .unwrap()
-            },
-            |function| async move {
-                function.call_async::<_, ()>(()).await.unwrap();
-            },
-            BatchSize::SmallInput,
-        );
-    });
-}
-
 criterion_group! {
     name = benches;
     config = Criterion::default()
@@ -306,13 +197,10 @@ criterion_group! {
         create_function,
         call_lua_function,
         call_sum_callback,
-        call_async_sum_callback,
         call_concat_callback,
         create_registry_values,
-        create_userdata,
-        call_userdata_index,
-        call_userdata_method,
-        call_async_userdata_method,
+        snapshots,
+        rollback
 }
 
 criterion_main!(benches);

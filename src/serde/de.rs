@@ -114,7 +114,7 @@ impl<'lua, 'de> serde::Deserializer<'de> for Deserializer<'lua> {
         V: de::Visitor<'de>,
     {
         match self.value {
-            Value::Nil => visitor.visit_unit(),
+            Value::Nil => visitor.visit_none(),
             Value::Boolean(b) => visitor.visit_bool(b),
             #[allow(clippy::useless_conversion)]
             Value::Integer(i) => {
@@ -122,20 +122,13 @@ impl<'lua, 'de> serde::Deserializer<'de> for Deserializer<'lua> {
             }
             #[allow(clippy::useless_conversion)]
             Value::Number(n) => visitor.visit_f64(n.into()),
-            #[cfg(feature = "luau")]
-            Value::Vector(_, _, _) => self.deserialize_seq(visitor),
             Value::String(s) => match s.to_str() {
                 Ok(s) => visitor.visit_str(s),
                 Err(_) => visitor.visit_bytes(s.as_bytes()),
             },
             Value::Table(ref t) if t.raw_len() > 0 || t.is_array() => self.deserialize_seq(visitor),
             Value::Table(_) => self.deserialize_map(visitor),
-            Value::LightUserData(ud) if ud.0.is_null() => visitor.visit_none(),
-            Value::Function(_)
-            | Value::Thread(_)
-            | Value::UserData(_)
-            | Value::LightUserData(_)
-            | Value::Error(_) => {
+            Value::Function(_) | Value::Error(_) => {
                 if self.options.deny_unsupported_types {
                     Err(de::Error::custom(format!(
                         "unsupported value type `{}`",
@@ -155,7 +148,6 @@ impl<'lua, 'de> serde::Deserializer<'de> for Deserializer<'lua> {
     {
         match self.value {
             Value::Nil => visitor.visit_none(),
-            Value::LightUserData(ud) if ud.0.is_null() => visitor.visit_none(),
             _ => visitor.visit_some(self),
         }
     }
@@ -215,22 +207,12 @@ impl<'lua, 'de> serde::Deserializer<'de> for Deserializer<'lua> {
         V: de::Visitor<'de>,
     {
         match self.value {
-            #[cfg(feature = "luau")]
-            Value::Vector(x, y, z) => {
-                let mut deserializer = VecDeserializer {
-                    vec: [x, y, z],
-                    next: 0,
-                    options: self.options,
-                    visited: self.visited,
-                };
-                visitor.visit_seq(&mut deserializer)
-            }
             Value::Table(t) => {
                 let _guard = RecursionGuard::new(&t, &self.visited);
 
                 let len = t.raw_len() as usize;
                 let mut deserializer = SeqDeserializer {
-                    seq: t.raw_sequence_values(),
+                    seq: t.raw_sequence_values_by_len(None),
                     options: self.options,
                     visited: self.visited,
                 };
@@ -367,39 +349,6 @@ impl<'lua, 'de> de::SeqAccess<'de> for SeqDeserializer<'lua> {
             (lower, Some(upper)) if lower == upper => Some(upper),
             _ => None,
         }
-    }
-}
-
-#[cfg(feature = "luau")]
-struct VecDeserializer {
-    vec: [f32; 3],
-    next: usize,
-    options: Options,
-    visited: Rc<RefCell<FxHashSet<*const c_void>>>,
-}
-
-#[cfg(feature = "luau")]
-impl<'de> de::SeqAccess<'de> for VecDeserializer {
-    type Error = Error;
-
-    fn next_element_seed<T>(&mut self, seed: T) -> Result<Option<T::Value>>
-    where
-        T: de::DeserializeSeed<'de>,
-    {
-        match self.vec.get(self.next) {
-            Some(&n) => {
-                self.next += 1;
-                let visited = Rc::clone(&self.visited);
-                let deserializer =
-                    Deserializer::from_parts(Value::Number(n as _), self.options, visited);
-                seed.deserialize(deserializer).map(Some)
-            }
-            None => Ok(None),
-        }
-    }
-
-    fn size_hint(&self) -> Option<usize> {
-        Some(3)
     }
 }
 
@@ -590,13 +539,7 @@ fn check_value_if_skip(
                 return Ok(true); // skip
             }
         }
-        Value::Function(_)
-        | Value::Thread(_)
-        | Value::UserData(_)
-        | Value::LightUserData(_)
-        | Value::Error(_)
-            if !options.deny_unsupported_types =>
-        {
+        Value::Function(_) | Value::Error(_) if !options.deny_unsupported_types => {
             return Ok(true); // skip
         }
         _ => {}

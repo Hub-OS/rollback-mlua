@@ -1,3 +1,6 @@
+use crate::lua::LuaInner;
+use crate::types::Callback;
+use generational_arena::Index as GenerationalIndex;
 use std::any::{Any, TypeId};
 use std::ffi::CStr;
 use std::fmt::Write;
@@ -11,28 +14,15 @@ use once_cell::sync::Lazy;
 use rustc_hash::FxHashMap;
 
 use crate::error::{Error, Result};
-use crate::ffi;
+use crate::{ffi, Lua, UserDataRef};
 
 static METATABLE_CACHE: Lazy<FxHashMap<TypeId, u8>> = Lazy::new(|| {
     let mut map = FxHashMap::with_capacity_and_hasher(32, Default::default());
-    crate::lua::init_metatable_cache(&mut map);
+    map.insert(TypeId::of::<Callback>(), 0);
     map.insert(TypeId::of::<WrappedFailure>(), 0);
     map.insert(TypeId::of::<String>(), 0);
     map
 });
-
-// Checks that Lua has enough free stack space for future stack operations. On failure, this will
-// panic with an internal error message.
-#[inline]
-pub unsafe fn assert_stack(state: *mut ffi::lua_State, amount: c_int) {
-    // TODO: This should only be triggered when there is a logic error in `mlua`. In the future,
-    // when there is a way to be confident about stack safety and test it, this could be enabled
-    // only when `cfg!(debug_assertions)` is true.
-    mlua_assert!(
-        ffi::lua_checkstack(state, amount) != 0,
-        "out of stack space"
-    );
-}
 
 // Checks that Lua has enough free stack space and returns `Error::StackError` on failure.
 #[inline]
@@ -62,16 +52,6 @@ impl StackGuard {
             extra: 0,
         }
     }
-
-    // Similar to `new`, but checks and keeps `extra` elements from top of the stack on Drop.
-    #[inline]
-    pub unsafe fn new_extra(state: *mut ffi::lua_State, extra: c_int) -> StackGuard {
-        StackGuard {
-            state,
-            top: ffi::lua_gettop(state),
-            extra,
-        }
-    }
 }
 
 impl Drop for StackGuard {
@@ -79,7 +59,7 @@ impl Drop for StackGuard {
         unsafe {
             let top = ffi::lua_gettop(self.state);
             if top < self.top + self.extra {
-                mlua_panic!("{} too many stack values popped", self.top - top)
+                panic!("{} too many stack values popped", self.top - top)
             }
             if top > self.top + self.extra {
                 if self.extra > 0 {
@@ -194,7 +174,7 @@ where
 //   3) Otherwise, interprets the error as the appropriate lua error.
 // Uses 2 stack spaces, does not call checkstack.
 pub unsafe fn pop_error(state: *mut ffi::lua_State, err_code: c_int) -> Error {
-    mlua_debug_assert!(
+    debug_assert!(
         err_code != ffi::LUA_OK && err_code != ffi::LUA_YIELD,
         "pop_error called with non-error return code"
     );
@@ -236,7 +216,7 @@ pub unsafe fn pop_error(state: *mut ffi::lua_State, err_code: c_int) -> Error {
                 ffi::LUA_ERRMEM => Error::MemoryError(err_string),
                 #[cfg(any(feature = "lua53", feature = "lua52"))]
                 ffi::LUA_ERRGCMM => Error::GarbageCollectorError(err_string),
-                _ => mlua_panic!("unrecognized lua error code"),
+                _ => panic!("unrecognized lua error code"),
             }
         }
     }
@@ -285,10 +265,9 @@ where
     })
 }
 
-// Internally uses 3 stack spaces, does not call checkstack.
-#[cfg(not(feature = "luau"))]
+// Internally uses 4 stack spaces, does not call checkstack.
 #[inline]
-pub unsafe fn push_userdata<T>(state: *mut ffi::lua_State, t: T, protect: bool) -> Result<()> {
+unsafe fn push_userdata<T>(state: *mut ffi::lua_State, t: T, protect: bool) -> Result<()> {
     let ud = if protect {
         protect_lua!(state, 0, 1, |state| {
             ffi::lua_newuserdata(state, mem::size_of::<T>()) as *mut T
@@ -300,85 +279,99 @@ pub unsafe fn push_userdata<T>(state: *mut ffi::lua_State, t: T, protect: bool) 
     Ok(())
 }
 
-// Internally uses 3 stack spaces, does not call checkstack.
-#[cfg(feature = "luau")]
 #[inline]
-pub unsafe fn push_userdata<T>(state: *mut ffi::lua_State, t: T, protect: bool) -> Result<()> {
-    unsafe extern "C" fn destructor<T>(ud: *mut c_void) {
-        ptr::drop_in_place(ud as *mut T);
-    }
-
-    let size = mem::size_of::<T>();
-    let ud = if protect {
-        protect_lua!(state, 0, 1, |state| {
-            ffi::lua_newuserdatadtor(state, size, destructor::<T>) as *mut T
-        })?
-    } else {
-        ffi::lua_newuserdatadtor(state, size, destructor::<T>) as *mut T
-    };
-    ptr::write(ud, t);
-
-    Ok(())
-}
-
-// Internally uses 3 stack spaces, does not call checkstack.
-#[cfg(feature = "lua54")]
-#[inline]
-pub unsafe fn push_userdata_uv<T>(
-    state: *mut ffi::lua_State,
-    t: T,
-    nuvalue: c_int,
-    protect: bool,
-) -> Result<()> {
-    let ud = if protect {
-        protect_lua!(state, 0, 1, |state| {
-            ffi::lua_newuserdatauv(state, mem::size_of::<T>(), nuvalue) as *mut T
-        })?
-    } else {
-        ffi::lua_newuserdatauv(state, mem::size_of::<T>(), nuvalue) as *mut T
-    };
-    ptr::write(ud, t);
-    Ok(())
-}
-
-#[inline]
-pub unsafe fn get_userdata<T>(state: *mut ffi::lua_State, index: c_int) -> *mut T {
+unsafe fn get_userdata<T>(state: *mut ffi::lua_State, index: c_int) -> *mut T {
     let ud = ffi::lua_touserdata(state, index) as *mut T;
-    mlua_debug_assert!(!ud.is_null(), "userdata pointer is null");
+    debug_assert!(!ud.is_null(), "userdata pointer is null");
     ud
+}
+
+#[inline]
+pub(crate) unsafe fn get_userdata_ref(state: *mut ffi::lua_State, index: c_int) -> UserDataRef {
+    let ud = ffi::lua_touserdata(state, index) as *const UserDataRef;
+    debug_assert!(!ud.is_null(), "userdata pointer is null");
+    *ud
 }
 
 // Pops the userdata off of the top of the stack and returns it to rust, invalidating the lua
 // userdata and gives it the special "destructed" userdata metatable. Userdata must not have been
 // previously invalidated, and this method does not check for this.
 // Uses 1 extra stack space and does not call checkstack.
-pub unsafe fn take_userdata<T>(state: *mut ffi::lua_State) -> T {
+pub unsafe fn take_gc_userdata<T>(state: *mut ffi::lua_State) -> T {
     // We set the metatable of userdata on __gc to a special table with no __gc method and with
     // metamethods that trigger an error on access. We do this so that it will not be double
     // dropped, and also so that it cannot be used or identified as any particular userdata type
     // after the first call to __gc.
     get_destructed_userdata_metatable(state);
     ffi::lua_setmetatable(state, -2);
-    let ud = get_userdata::<T>(state, -1);
+    let ud_ref = get_userdata_ref(state, -1);
 
-    // Update userdata tag to disable destructor and mark as destructed
-    #[cfg(feature = "luau")]
-    ffi::lua_setuserdatatag(state, -1, 1);
+    let lua_inner = &(*ud_ref.lua_inner);
+    let ud = get_userdata::<T>(lua_inner.ref_thread, ud_ref.ref_index);
+    let t = ptr::read(ud);
+    lua_inner.drop_ref_index(ud_ref.ref_index);
+
+    if lua_inner.memory.is_some() {
+        let mut snapshot = lua_inner.snapshot.borrow_mut();
+        snapshot.ud_recent_destruction.push(ud_ref.destructor_index);
+    }
 
     ffi::lua_pop(state, 1);
-    ptr::read(ud)
+    t
 }
 
 // Pushes the userdata and attaches a metatable with __gc method.
-// Internally uses 3 stack spaces, does not call checkstack.
-pub unsafe fn push_gc_userdata<T: Any>(
-    state: *mut ffi::lua_State,
-    t: T,
-    protect: bool,
-) -> Result<()> {
+// Internally uses 4 stack spaces and one reference stack space, does not call checkstack.
+pub unsafe fn push_gc_userdata<T: Any>(lua: &Lua, t: T, protect: bool) -> Result<()> {
+    let state = lua.state;
+
     push_userdata(state, t, protect)?;
+
+    // move to the refthread for GC control
+    let lua_ref = lua.pop_ref();
+    let ref_index = lua_ref.index;
+
+    let mut ud_destructors = lua.user_data_destructors.borrow_mut();
+    let destructor_index = if lua.max_snapshots() == 0 {
+        // destructor doesn't need to be stored for non rollback vms
+        GenerationalIndex::from_raw_parts(0, 0)
+    } else {
+        let lua_inner = lua.0;
+
+        ud_destructors.insert(Box::new(move || {
+            let lua_inner = &*lua_inner;
+            let ud = get_userdata::<T>(lua_inner.ref_thread, ref_index);
+            mem::drop(ptr::read(ud));
+            lua_inner.drop_ref_index(ref_index);
+        }))
+    };
+
+    let wrapped = UserDataRef {
+        ref_index,
+        destructor_index,
+        lua_inner: lua.0,
+    };
+
+    if let Err(e) = push_userdata(state, wrapped, protect) {
+        let ud = get_userdata::<T>(lua.ref_thread, ref_index);
+        let _ = ptr::read(ud);
+        ud_destructors.remove(destructor_index);
+
+        return Err(e);
+    }
+
+    // forgetting after error detection
+    // the ref should drop for errors
+    mem::forget(lua_ref);
+
     get_gc_metatable::<T>(state);
     ffi::lua_setmetatable(state, -2);
+
+    if lua.max_snapshots() > 0 {
+        let mut snapshot = lua.snapshot.borrow_mut();
+        snapshot.ud_recent_construction.push(destructor_index);
+    }
+
     Ok(())
 }
 
@@ -388,8 +381,8 @@ pub unsafe fn get_gc_userdata<T: Any>(
     index: c_int,
     mt_ptr: *const c_void,
 ) -> *mut T {
-    let ud = ffi::lua_touserdata(state, index) as *mut T;
-    if ud.is_null() || ffi::lua_getmetatable(state, index) == 0 {
+    let ud_ref = ffi::lua_touserdata(state, index) as *const UserDataRef;
+    if ud_ref.is_null() || ffi::lua_getmetatable(state, index) == 0 {
         return ptr::null_mut();
     }
     if !mt_ptr.is_null() {
@@ -406,201 +399,25 @@ pub unsafe fn get_gc_userdata<T: Any>(
             return ptr::null_mut();
         }
     }
-    ud
+
+    ffi::lua_touserdata((*(*ud_ref).lua_inner).ref_thread, (*ud_ref).ref_index) as *mut T
 }
 
-unsafe extern "C" fn lua_error_impl(state: *mut ffi::lua_State) -> c_int {
-    ffi::lua_error(state);
-}
-
-unsafe extern "C" fn lua_isfunction_impl(state: *mut ffi::lua_State) -> c_int {
-    let t = ffi::lua_type(state, -1);
-    ffi::lua_pop(state, 1);
-    ffi::lua_pushboolean(state, (t == ffi::LUA_TFUNCTION) as c_int);
-    1
-}
-
-unsafe fn init_userdata_metatable_index(state: *mut ffi::lua_State) -> Result<()> {
-    let index_key = &USERDATA_METATABLE_INDEX as *const u8 as *const _;
-    if ffi::lua_rawgetp(state, ffi::LUA_REGISTRYINDEX, index_key) == ffi::LUA_TFUNCTION {
-        return Ok(());
-    }
-    ffi::lua_pop(state, 1);
-
-    // Create and cache `__index` helper
-    let code = cstr!(
-        r#"
-            local error, isfunction = ...
-            return function (__index, field_getters, methods)
-                return function (self, key)
-                    if field_getters ~= nil then
-                        local field_getter = field_getters[key]
-                        if field_getter ~= nil then
-                            return field_getter(self)
-                        end
-                    end
-
-                    if methods ~= nil then
-                        local method = methods[key]
-                        if method ~= nil then
-                            return method
-                        end
-                    end
-
-                    if isfunction(__index) then
-                        return __index(self, key)
-                    elseif __index == nil then
-                        error("attempt to get an unknown field '"..key.."'")
-                    else
-                        return __index[key]
-                    end
-                end
-            end
-    "#
-    );
-    let code_len = CStr::from_ptr(code).to_bytes().len();
-    protect_lua!(state, 0, 1, |state| {
-        let ret = ffi::luaL_loadbuffer(state, code, code_len, cstr!("__mlua_index"));
-        if ret != ffi::LUA_OK {
-            ffi::lua_error(state);
-        }
-        ffi::lua_pushcfunction(state, lua_error_impl);
-        ffi::lua_pushcfunction(state, lua_isfunction_impl);
-        ffi::lua_call(state, 2, 1);
-
-        // Store in the registry
-        ffi::lua_pushvalue(state, -1);
-        ffi::lua_rawsetp(state, ffi::LUA_REGISTRYINDEX, index_key);
-    })
-}
-
-pub unsafe fn init_userdata_metatable_newindex(state: *mut ffi::lua_State) -> Result<()> {
-    let newindex_key = &USERDATA_METATABLE_NEWINDEX as *const u8 as *const _;
-    if ffi::lua_rawgetp(state, ffi::LUA_REGISTRYINDEX, newindex_key) == ffi::LUA_TFUNCTION {
-        return Ok(());
-    }
-    ffi::lua_pop(state, 1);
-
-    // Create and cache `__newindex` helper
-    let code = cstr!(
-        r#"
-            local error, isfunction = ...
-            return function (__newindex, field_setters)
-                return function (self, key, value)
-                    if field_setters ~= nil then
-                        local field_setter = field_setters[key]
-                        if field_setter ~= nil then
-                            field_setter(self, value)
-                            return
-                        end
-                    end
-
-                    if isfunction(__newindex) then
-                        __newindex(self, key, value)
-                    elseif __newindex == nil then
-                        error("attempt to set an unknown field '"..key.."'")
-                    else
-                        __newindex[key] = value
-                    end
-                end
-            end
-    "#
-    );
-    let code_len = CStr::from_ptr(code).to_bytes().len();
-    protect_lua!(state, 0, 1, |state| {
-        let ret = ffi::luaL_loadbuffer(state, code, code_len, cstr!("__mlua_newindex"));
-        if ret != ffi::LUA_OK {
-            ffi::lua_error(state);
-        }
-        ffi::lua_pushcfunction(state, lua_error_impl);
-        ffi::lua_pushcfunction(state, lua_isfunction_impl);
-        ffi::lua_call(state, 2, 1);
-
-        // Store in the registry
-        ffi::lua_pushvalue(state, -1);
-        ffi::lua_rawsetp(state, ffi::LUA_REGISTRYINDEX, newindex_key);
-    })
-}
-
-// Populates the given table with the appropriate members to be a userdata metatable for the given type.
-// This function takes the given table at the `metatable` index, and adds an appropriate `__gc` member
-// to it for the given type and a `__metatable` entry to protect the table from script access.
-// The function also, if given a `field_getters` or `methods` tables, will create an `__index` metamethod
-// (capturing previous one) to lookup in `field_getters` first, then `methods` and falling back to the
-// captured `__index` if no matches found.
-// The same is also applicable for `__newindex` metamethod and `field_setters` table.
-// Internally uses 9 stack spaces and does not call checkstack.
-pub unsafe fn init_userdata_metatable<T>(
-    state: *mut ffi::lua_State,
-    metatable: c_int,
-    field_getters: Option<c_int>,
-    field_setters: Option<c_int>,
-    methods: Option<c_int>,
-) -> Result<()> {
-    ffi::lua_pushvalue(state, metatable);
-
-    if field_getters.is_some() || methods.is_some() {
-        // Push `__index` generator function
-        init_userdata_metatable_index(state)?;
-
-        push_string(state, b"__index", true)?;
-        let index_type = ffi::lua_rawget(state, -3);
-        match index_type {
-            ffi::LUA_TNIL | ffi::LUA_TTABLE | ffi::LUA_TFUNCTION => {
-                for &idx in &[field_getters, methods] {
-                    if let Some(idx) = idx {
-                        ffi::lua_pushvalue(state, idx);
-                    } else {
-                        ffi::lua_pushnil(state);
-                    }
-                }
-
-                // Generate `__index`
-                protect_lua!(state, 4, 1, fn(state) ffi::lua_call(state, 3, 1))?;
-            }
-            _ => mlua_panic!("improper __index type {}", index_type),
-        }
-
-        rawset_field(state, -2, "__index")?;
-    }
-
-    if let Some(field_setters) = field_setters {
-        // Push `__newindex` generator function
-        init_userdata_metatable_newindex(state)?;
-
-        push_string(state, b"__newindex", true)?;
-        let newindex_type = ffi::lua_rawget(state, -3);
-        match newindex_type {
-            ffi::LUA_TNIL | ffi::LUA_TTABLE | ffi::LUA_TFUNCTION => {
-                ffi::lua_pushvalue(state, field_setters);
-                // Generate `__newindex`
-                protect_lua!(state, 3, 1, fn(state) ffi::lua_call(state, 2, 1))?;
-            }
-            _ => mlua_panic!("improper __newindex type {}", newindex_type),
-        }
-
-        rawset_field(state, -2, "__newindex")?;
-    }
-
-    #[cfg(not(feature = "luau"))]
-    {
-        ffi::lua_pushcfunction(state, userdata_destructor::<T>);
-        rawset_field(state, -2, "__gc")?;
-    }
-
-    ffi::lua_pushboolean(state, 0);
-    rawset_field(state, -2, "__metatable")?;
-
-    ffi::lua_pop(state, 1);
-
-    Ok(())
-}
-
-#[cfg(not(feature = "luau"))]
 pub unsafe extern "C" fn userdata_destructor<T>(state: *mut ffi::lua_State) -> c_int {
     // It's probably NOT a good idea to catch Rust panics in finalizer
     // Lua 5.4 ignores it, other versions generates `LUA_ERRGCMM` without calling message handler
-    take_userdata::<T>(state);
+    let ud_ref = get_userdata_ref(state, -1);
+    let lua_inner = &*(ud_ref.lua_inner);
+
+    if lua_inner.memory.is_some() {
+        let mut snapshot = lua_inner.snapshot.borrow_mut();
+        snapshot
+            .ud_pending_destruction
+            .push(ud_ref.destructor_index);
+    } else {
+        take_gc_userdata::<T>(state);
+    }
+
     0
 }
 
@@ -621,8 +438,9 @@ where
 {
     let nargs = ffi::lua_gettop(state);
 
-    // We need 2 extra stack spaces to store preallocated memory and error/panic metatable
-    let extra_stack = if nargs < 2 { 2 - nargs } else { 1 };
+    // We need 4 extra stack spaces to store preallocated memory and error/panic metatable
+    let extra_stack = if nargs < 4 { 4 - nargs } else { 1 };
+
     ffi::luaL_checkstack(
         state,
         extra_stack,
@@ -631,18 +449,32 @@ where
 
     // We cannot shadow Rust errors with Lua ones, we pre-allocate enough memory
     // to store a wrapped error or panic *before* we proceed.
-    let ud = WrappedFailure::new_userdata(state);
+    let temp_lua = TempLua::from_state(state);
+
+    ffi::luaL_checkstack(
+        temp_lua.lua.ref_thread,
+        1,
+        cstr!("not enough reference stack space for callback error handling"),
+    );
+
+    if let Err(_) = push_gc_userdata(&temp_lua.lua, WrappedFailure::None, true) {
+        ffi::lua_pushnil(state);
+        ffi::lua_error(state);
+    }
+
+    let wrapped_error = get_gc_userdata::<WrappedFailure>(state, -1, ptr::null());
+
     ffi::lua_rotate(state, 1, 1);
 
     match catch_unwind(AssertUnwindSafe(|| f(nargs))) {
         Ok(Ok(r)) => {
-            ffi::lua_remove(state, 1);
+            // dropping user data to reduce ref_thread usage
+            ffi::lua_rotate(state, 1, -1);
+            take_gc_userdata::<WrappedFailure>(state);
             r
         }
         Ok(Err(err)) => {
             ffi::lua_settop(state, 1);
-
-            let wrapped_error = ud as *mut WrappedFailure;
 
             // Build `CallbackError` with traceback
             let traceback = if ffi::lua_checkstack(state, ffi::LUA_TRACEBACK_STACK) != 0 {
@@ -658,16 +490,12 @@ where
                 wrapped_error,
                 WrappedFailure::Error(Error::CallbackError { traceback, cause }),
             );
-            get_gc_metatable::<WrappedFailure>(state);
-            ffi::lua_setmetatable(state, -2);
 
             ffi::lua_error(state)
         }
         Err(p) => {
             ffi::lua_settop(state, 1);
-            ptr::write(ud as *mut WrappedFailure, WrappedFailure::Panic(Some(p)));
-            get_gc_metatable::<WrappedFailure>(state);
-            ffi::lua_setmetatable(state, -2);
+            ptr::write(wrapped_error, WrappedFailure::Panic(Some(p)));
             ffi::lua_error(state)
         }
     }
@@ -689,20 +517,6 @@ pub unsafe extern "C" fn error_traceback(state: *mut ffi::lua_State) -> c_int {
     }
 
     1
-}
-
-// A variant of `error_traceback` that can safely inspect another (yielded) thread stack
-pub unsafe fn error_traceback_thread(state: *mut ffi::lua_State, thread: *mut ffi::lua_State) {
-    // Move error object to the main thread to safely call `__tostring` metamethod if present
-    ffi::lua_xmove(thread, state, 1);
-
-    if get_gc_userdata::<WrappedFailure>(state, -1, ptr::null()).is_null() {
-        let s = ffi::luaL_tolstring(state, -1, ptr::null_mut());
-        if ffi::lua_checkstack(state, ffi::LUA_TRACEBACK_STACK) != 0 {
-            ffi::luaL_traceback(state, thread, s, 0);
-            ffi::lua_remove(state, -2);
-        }
-    }
 }
 
 // A variant of `pcall` that does not allow Lua to catch Rust panics from `callback_error`.
@@ -777,31 +591,6 @@ pub unsafe extern "C" fn safe_xpcall(state: *mut ffi::lua_State) -> c_int {
     }
 }
 
-// Returns Lua main thread for Lua >= 5.2 or checks that the passed thread is main for Lua 5.1.
-// Does not call lua_checkstack, uses 1 stack space.
-pub unsafe fn get_main_state(state: *mut ffi::lua_State) -> Option<*mut ffi::lua_State> {
-    #[cfg(any(feature = "lua54", feature = "lua53", feature = "lua52"))]
-    {
-        ffi::lua_rawgeti(state, ffi::LUA_REGISTRYINDEX, ffi::LUA_RIDX_MAINTHREAD);
-        let main_state = ffi::lua_tothread(state, -1);
-        ffi::lua_pop(state, 1);
-        Some(main_state)
-    }
-    #[cfg(any(feature = "lua51", feature = "luajit"))]
-    {
-        // Check the current state first
-        let is_main_state = ffi::lua_pushthread(state) == 1;
-        ffi::lua_pop(state, 1);
-        if is_main_state {
-            Some(state)
-        } else {
-            None
-        }
-    }
-    #[cfg(feature = "luau")]
-    Some(ffi::lua_mainthread(state))
-}
-
 // Initialize the internal (with __gc method) metatable for a type T.
 // Uses 6 stack spaces and calls checkstack.
 pub unsafe fn init_gc_metatable<T: Any>(
@@ -812,11 +601,8 @@ pub unsafe fn init_gc_metatable<T: Any>(
 
     push_table(state, 0, 3, true)?;
 
-    #[cfg(not(feature = "luau"))]
-    {
-        ffi::lua_pushcfunction(state, userdata_destructor::<T>);
-        rawset_field(state, -2, "__gc")?;
-    }
+    ffi::lua_pushcfunction(state, userdata_destructor::<T>);
+    rawset_field(state, -2, "__gc")?;
 
     ffi::lua_pushboolean(state, 0);
     rawset_field(state, -2, "__metatable")?;
@@ -836,13 +622,38 @@ pub unsafe fn init_gc_metatable<T: Any>(
 
 pub unsafe fn get_gc_metatable<T: Any>(state: *mut ffi::lua_State) {
     let type_id = TypeId::of::<T>();
-    let ref_addr =
-        mlua_expect!(METATABLE_CACHE.get(&type_id), "gc metatable does not exist") as *const u8;
+    let ref_addr = METATABLE_CACHE
+        .get(&type_id)
+        .expect("gc metatable does not exist") as *const u8;
     ffi::lua_rawgetp(state, ffi::LUA_REGISTRYINDEX, ref_addr as *const c_void);
 }
 
+unsafe fn lua_inner(state: *mut ffi::lua_State) -> *mut LuaInner {
+    let lua_inner_key = &LUA_INNER_KEY as *const u8 as *const c_void;
+    ffi::lua_rawgetp(state, ffi::LUA_REGISTRYINDEX, lua_inner_key);
+    let lua_inner = ffi::lua_touserdata(state, -1) as *mut LuaInner;
+    ffi::lua_pop(state, 1);
+
+    lua_inner
+}
+
+pub unsafe fn init_lua_inner_registry(lua: &Lua) -> Result<()> {
+    let state = lua.state;
+    check_stack(state, 2)?;
+
+    ffi::lua_pushlightuserdata(state, lua.0 as *mut c_void);
+
+    protect_lua!(state, 1, 0, fn(state) {
+        let lua_inner_key = &LUA_INNER_KEY as *const u8 as *const c_void;
+        ffi::lua_rawsetp(state, ffi::LUA_REGISTRYINDEX, lua_inner_key);
+    })?;
+
+    Ok(())
+}
+
 // Initialize the error, panic, and destructed userdata metatables.
-pub unsafe fn init_error_registry(state: *mut ffi::lua_State) -> Result<()> {
+pub unsafe fn init_error_registry(lua: &Lua) -> Result<()> {
+    let state = lua.state;
     check_stack(state, 7)?;
 
     // Create error and panic metatables
@@ -855,7 +666,7 @@ pub unsafe fn init_error_registry(state: *mut ffi::lua_State) -> Result<()> {
                 Some(WrappedFailure::Error(error)) => {
                     let err_buf_key = &ERROR_PRINT_BUFFER_KEY as *const u8 as *const c_void;
                     ffi::lua_rawgetp(state, ffi::LUA_REGISTRYINDEX, err_buf_key);
-                    let err_buf = ffi::lua_touserdata(state, -1) as *mut String;
+                    let err_buf = get_gc_userdata::<String>(state, -1, ptr::null());
                     ffi::lua_pop(state, 2);
 
                     (*err_buf).clear();
@@ -868,7 +679,7 @@ pub unsafe fn init_error_registry(state: *mut ffi::lua_State) -> Result<()> {
                 Some(WrappedFailure::Panic(Some(ref panic))) => {
                     let err_buf_key = &ERROR_PRINT_BUFFER_KEY as *const u8 as *const c_void;
                     ffi::lua_rawgetp(state, ffi::LUA_REGISTRYINDEX, err_buf_key);
-                    let err_buf = ffi::lua_touserdata(state, -1) as *mut String;
+                    let err_buf = get_gc_userdata::<String>(state, -1, ptr::null());
                     (*err_buf).clear();
                     ffi::lua_pop(state, 2);
 
@@ -942,17 +753,10 @@ pub unsafe fn init_error_registry(state: *mut ffi::lua_State) -> Result<()> {
         "__newindex",
         "__call",
         "__tostring",
-        #[cfg(any(
-            feature = "lua54",
-            feature = "lua53",
-            feature = "lua52",
-            feature = "luajit52"
-        ))]
+        #[cfg(any(feature = "lua54", feature = "lua53", feature = "lua52"))]
         "__pairs",
-        #[cfg(any(feature = "lua53", feature = "lua52", feature = "luajit52"))]
+        #[cfg(any(feature = "lua53", feature = "lua52"))]
         "__ipairs",
-        #[cfg(feature = "luau")]
-        "__iter",
         #[cfg(feature = "lua54")]
         "__close",
     ] {
@@ -968,7 +772,7 @@ pub unsafe fn init_error_registry(state: *mut ffi::lua_State) -> Result<()> {
 
     // Create error print buffer
     init_gc_metatable::<String>(state, None)?;
-    push_gc_userdata(state, String::new(), true)?;
+    push_gc_userdata(lua, String::new(), true)?;
     protect_lua!(state, 1, 0, fn(state) {
         let err_buf_key = &ERROR_PRINT_BUFFER_KEY as *const u8 as *const c_void;
         ffi::lua_rawsetp(state, ffi::LUA_REGISTRYINDEX, err_buf_key);
@@ -983,20 +787,21 @@ pub(crate) enum WrappedFailure {
     Panic(Option<Box<dyn Any + Send + 'static>>),
 }
 
-impl WrappedFailure {
-    pub(crate) unsafe fn new_userdata(state: *mut ffi::lua_State) -> *mut Self {
-        let size = mem::size_of::<WrappedFailure>();
-        #[cfg(feature = "luau")]
-        let ud = {
-            unsafe extern "C" fn destructor(p: *mut c_void) {
-                ptr::drop_in_place(p as *mut WrappedFailure);
-            }
-            ffi::lua_newuserdatadtor(state, size, destructor) as *mut Self
-        };
-        #[cfg(not(feature = "luau"))]
-        let ud = ffi::lua_newuserdata(state, size) as *mut Self;
-        ptr::write(ud, WrappedFailure::None);
-        ud
+struct TempLua {
+    lua: Lua,
+}
+
+impl TempLua {
+    unsafe fn from_state(state: *mut ffi::lua_State) -> Self {
+        Self {
+            lua: Lua(lua_inner(state)),
+        }
+    }
+}
+
+impl Drop for TempLua {
+    fn drop(&mut self) {
+        self.lua.0 = ptr::null_mut();
     }
 }
 
@@ -1018,13 +823,6 @@ pub(crate) unsafe fn to_string(state: *mut ffi::lua_State, index: c_int) -> Stri
             } else {
                 i.to_string()
             }
-        }
-        #[cfg(feature = "luau")]
-        ffi::LUA_TVECTOR => {
-            let v = ffi::lua_tovector(state, index);
-            mlua_debug_assert!(!v.is_null(), "vector is null");
-            let (x, y, z) = (*v, *v.add(1), *v.add(2));
-            format!("vector({},{},{})", x, y, z)
         }
         ffi::LUA_TSTRING => {
             let mut size = 0;
@@ -1055,5 +853,4 @@ pub(crate) unsafe fn ptr_to_cstr_bytes<'a>(input: *const c_char) -> Option<&'a [
 
 static DESTRUCTED_USERDATA_METATABLE: u8 = 0;
 static ERROR_PRINT_BUFFER_KEY: u8 = 0;
-static USERDATA_METATABLE_INDEX: u8 = 0;
-static USERDATA_METATABLE_NEWINDEX: u8 = 0;
+static LUA_INNER_KEY: u8 = 0;

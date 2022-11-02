@@ -12,7 +12,7 @@ use {
 
 use crate::error::{Error, Result};
 use crate::ffi;
-use crate::types::LuaRef;
+use crate::lua_ref::LuaRef;
 
 /// Handle to an internal Lua string.
 ///
@@ -26,7 +26,7 @@ impl<'lua> String<'lua> {
     /// # Examples
     ///
     /// ```
-    /// # use mlua::{Lua, Result, String};
+    /// # use rollback_mlua::{Lua, Result, String};
     /// # fn main() -> Result<()> {
     /// # let lua = Lua::new();
     /// let globals = lua.globals();
@@ -57,7 +57,7 @@ impl<'lua> String<'lua> {
     /// # Examples
     ///
     /// ```
-    /// # use mlua::{Lua, Result};
+    /// # use rollback_mlua::{Lua, Result};
     /// # fn main() -> Result<()> {
     /// let lua = Lua::new();
     ///
@@ -79,7 +79,7 @@ impl<'lua> String<'lua> {
     /// # Examples
     ///
     /// ```
-    /// # use mlua::{Lua, Result, String};
+    /// # use rollback_mlua::{Lua, Result, String};
     /// # fn main() -> Result<()> {
     /// # let lua = Lua::new();
     /// let non_utf8: String = lua.load(r#"  "test\255"  "#).eval()?;
@@ -96,10 +96,11 @@ impl<'lua> String<'lua> {
 
     /// Get the bytes that make up this string, including the trailing nul byte.
     pub fn as_bytes_with_nul(&self) -> &[u8] {
-        let ref_thread = self.0.lua.ref_thread();
+        let ref_thread = self.0.lua.ref_thread;
         unsafe {
-            mlua_debug_assert!(
-                ffi::lua_type(ref_thread, self.0.index) == ffi::LUA_TSTRING,
+            debug_assert_eq!(
+                ffi::lua_type(ref_thread, self.0.index),
+                ffi::LUA_TSTRING,
                 "string ref is not string type"
             );
 
@@ -119,8 +120,8 @@ impl<'lua> String<'lua> {
     /// Typically this function is used only for hashing and debug information.
     #[inline]
     pub fn to_pointer(&self) -> *const c_void {
-        let ref_thread = self.0.lua.ref_thread();
-        unsafe { ffi::lua_topointer(ref_thread, self.0.index) }
+        let lua = self.0.lua;
+        unsafe { ffi::lua_topointer(lua.ref_thread, self.0.index) }
     }
 }
 
@@ -138,7 +139,7 @@ impl<'lua> Borrow<[u8]> for String<'lua> {
 
 // Lua strings are basically &[u8] slices, so implement PartialEq for anything resembling that.
 //
-// This makes our `String` comparable with `Vec<u8>`, `[u8]`, `&str`, `String` and `mlua::String`
+// This makes our `String` comparable with `Vec<u8>`, `[u8]`, `&str`, `String` and `rollback_mlua::String`
 // itself.
 //
 // The only downside is that this disallows a comparison with `Cow<str>`, as that only implements

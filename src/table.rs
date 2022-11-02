@@ -11,12 +11,10 @@ use {
 use crate::error::{Error, Result};
 use crate::ffi;
 use crate::function::Function;
-use crate::types::{Integer, LuaRef};
-use crate::util::{assert_stack, check_stack, StackGuard};
+use crate::lua_ref::LuaRef;
+use crate::types::Integer;
+use crate::util::{check_stack, StackGuard};
 use crate::value::{FromLua, FromLuaMulti, Nil, ToLua, ToLuaMulti, Value};
-
-#[cfg(feature = "async")]
-use {futures_core::future::LocalBoxFuture, futures_util::future};
 
 /// Handle to an internal Lua table.
 #[derive(Clone, Debug)]
@@ -36,7 +34,7 @@ impl<'lua> Table<'lua> {
     /// Export a value as a global to make it usable from Lua:
     ///
     /// ```
-    /// # use mlua::{Lua, Result};
+    /// # use rollback_mlua::{Lua, Result};
     /// # fn main() -> Result<()> {
     /// # let lua = Lua::new();
     /// let globals = lua.globals();
@@ -90,7 +88,7 @@ impl<'lua> Table<'lua> {
     /// Query the version of the Lua interpreter:
     ///
     /// ```
-    /// # use mlua::{Lua, Result};
+    /// # use rollback_mlua::{Lua, Result};
     /// # fn main() -> Result<()> {
     /// # let lua = Lua::new();
     /// let globals = lua.globals();
@@ -187,7 +185,7 @@ impl<'lua> Table<'lua> {
     /// Compare two tables using `__eq` metamethod:
     ///
     /// ```
-    /// # use mlua::{Lua, Result, Table};
+    /// # use rollback_mlua::{Lua, Result, Table};
     /// # fn main() -> Result<()> {
     /// # let lua = Lua::new();
     /// let table1 = lua.create_table()?;
@@ -234,9 +232,6 @@ impl<'lua> Table<'lua> {
 
     /// Sets a key-value pair without invoking metamethods.
     pub fn raw_set<K: ToLua<'lua>, V: ToLua<'lua>>(&self, key: K, value: V) -> Result<()> {
-        #[cfg(feature = "luau")]
-        self.check_readonly_write()?;
-
         let lua = self.0.lua;
         let key = key.to_lua(lua)?;
         let value = value.to_lua(lua)?;
@@ -306,12 +301,8 @@ impl<'lua> Table<'lua> {
 
     /// Appends a value to the back of the table without invoking metamethods.
     pub fn raw_push<V: ToLua<'lua>>(&self, value: V) -> Result<()> {
-        #[cfg(feature = "luau")]
-        self.check_readonly_write()?;
-
         let lua = self.0.lua;
         let value = value.to_lua(lua)?;
-
         unsafe {
             let _sg = StackGuard::new(lua.state);
             check_stack(lua.state, 4)?;
@@ -335,9 +326,6 @@ impl<'lua> Table<'lua> {
 
     /// Removes the last element from the table and returns it, without invoking metamethods.
     pub fn raw_pop<V: FromLua<'lua>>(&self) -> Result<V> {
-        #[cfg(feature = "luau")]
-        self.check_readonly_write()?;
-
         let lua = self.0.lua;
         let value = unsafe {
             let _sg = StackGuard::new(lua.state);
@@ -412,7 +400,7 @@ impl<'lua> Table<'lua> {
 
     /// Returns the result of the Lua `#` operator, without invoking the `__len` metamethod.
     pub fn raw_len(&self) -> Integer {
-        let ref_thread = self.0.lua.ref_thread();
+        let ref_thread = self.0.lua.ref_thread;
         unsafe { ffi::lua_rawlen(ref_thread, self.0.index) as Integer }
     }
 
@@ -423,7 +411,7 @@ impl<'lua> Table<'lua> {
         let lua = self.0.lua;
         unsafe {
             let _sg = StackGuard::new(lua.state);
-            assert_stack(lua.state, 2);
+            check_stack(lua.state, 2).unwrap();
 
             lua.push_ref(&self.0);
             if ffi::lua_getmetatable(lua.state, -1) == 0 {
@@ -439,16 +427,10 @@ impl<'lua> Table<'lua> {
     /// If `metatable` is `None`, the metatable is removed (if no metatable is set, this does
     /// nothing).
     pub fn set_metatable(&self, metatable: Option<Table<'lua>>) {
-        // Workaround to throw readonly error without returning Result
-        #[cfg(feature = "luau")]
-        if self.is_readonly() {
-            panic!("attempt to modify a readonly table");
-        }
-
         let lua = self.0.lua;
         unsafe {
             let _sg = StackGuard::new(lua.state);
-            assert_stack(lua.state, 2);
+            check_stack(lua.state, 2).unwrap();
 
             lua.push_ref(&self.0);
             if let Some(metatable) = metatable {
@@ -464,7 +446,7 @@ impl<'lua> Table<'lua> {
     #[doc(hidden)]
     #[inline]
     pub fn has_metatable(&self) -> bool {
-        let ref_thread = self.0.lua.ref_thread();
+        let ref_thread = self.0.lua.ref_thread;
         unsafe {
             if ffi::lua_getmetatable(ref_thread, self.0.index) != 0 {
                 ffi::lua_pop(ref_thread, 1);
@@ -472,32 +454,6 @@ impl<'lua> Table<'lua> {
             }
         }
         false
-    }
-
-    /// Sets `readonly` attribute on the table.
-    ///
-    /// Requires `feature = "luau"`
-    #[cfg(any(feature = "luau", doc))]
-    #[cfg_attr(docsrs, doc(cfg(feature = "luau")))]
-    pub fn set_readonly(&self, enabled: bool) {
-        let ref_thread = self.0.lua.ref_thread();
-        unsafe {
-            ffi::lua_setreadonly(ref_thread, self.0.index, enabled as _);
-            if !enabled {
-                // Reset "safeenv" flag
-                ffi::lua_setsafeenv(ref_thread, self.0.index, 0);
-            }
-        }
-    }
-
-    /// Returns `readonly` attribute of the table.
-    ///
-    /// Requires `feature = "luau"`
-    #[cfg(any(feature = "luau", doc))]
-    #[cfg_attr(docsrs, doc(cfg(feature = "luau")))]
-    pub fn is_readonly(&self) -> bool {
-        let ref_thread = self.0.lua.ref_thread();
-        unsafe { ffi::lua_getreadonly(ref_thread, self.0.index) != 0 }
     }
 
     /// Converts the table to a generic C pointer.
@@ -508,8 +464,8 @@ impl<'lua> Table<'lua> {
     /// Typically this function is used only for hashing and debug information.
     #[inline]
     pub fn to_pointer(&self) -> *const c_void {
-        let ref_thread = self.0.lua.ref_thread();
-        unsafe { ffi::lua_topointer(ref_thread, self.0.index) }
+        let lua = self.0.lua;
+        unsafe { ffi::lua_topointer(lua.ref_thread, self.0.index) }
     }
 
     /// Consume this table and return an iterator over the pairs of the table.
@@ -529,7 +485,7 @@ impl<'lua> Table<'lua> {
     /// Iterate over all globals:
     ///
     /// ```
-    /// # use mlua::{Lua, Result, Value};
+    /// # use rollback_mlua::{Lua, Result, Value};
     /// # fn main() -> Result<()> {
     /// # let lua = Lua::new();
     /// let globals = lua.globals();
@@ -571,7 +527,7 @@ impl<'lua> Table<'lua> {
     /// # Examples
     ///
     /// ```
-    /// # use mlua::{Lua, Result, Table};
+    /// # use rollback_mlua::{Lua, Result, Table};
     /// # fn main() -> Result<()> {
     /// # let lua = Lua::new();
     /// let my_table: Table = lua.load(r#"
@@ -625,6 +581,7 @@ impl<'lua> Table<'lua> {
         len: Option<Integer>,
     ) -> TableSequence<'lua, V> {
         let len = len.unwrap_or_else(|| self.raw_len());
+
         TableSequence {
             table: self.0,
             index: Some(1),
@@ -639,7 +596,7 @@ impl<'lua> Table<'lua> {
         let lua = self.0.lua;
         unsafe {
             let _sg = StackGuard::new(lua.state);
-            assert_stack(lua.state, 3);
+            check_stack(lua.state, 3).unwrap();
 
             lua.push_ref(&self.0);
             if ffi::lua_getmetatable(lua.state, -1) == 0 {
@@ -648,16 +605,6 @@ impl<'lua> Table<'lua> {
             crate::serde::push_array_metatable(lua.state);
             ffi::lua_rawequal(lua.state, -1, -2) != 0
         }
-    }
-
-    #[cfg(feature = "luau")]
-    #[inline(always)]
-    pub(crate) fn check_readonly_write(&self) -> Result<()> {
-        if self.is_readonly() {
-            let err = "attempt to modify a readonly table".to_string();
-            return Err(Error::RuntimeError(err));
-        }
-        Ok(())
     }
 }
 
@@ -684,17 +631,6 @@ pub trait TableExt<'lua> {
         A: ToLuaMulti<'lua>,
         R: FromLuaMulti<'lua>;
 
-    /// Asynchronously calls the table as function assuming it has `__call` metamethod.
-    ///
-    /// The metamethod is called with the table as its first argument, followed by the passed arguments.
-    #[cfg(feature = "async")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "async")))]
-    fn call_async<'fut, A, R>(&self, args: A) -> LocalBoxFuture<'fut, Result<R>>
-    where
-        'lua: 'fut,
-        A: ToLuaMulti<'lua>,
-        R: FromLuaMulti<'lua> + 'fut;
-
     /// Gets the function associated to `key` from the table and executes it,
     /// passing the table itself along with `args` as function arguments.
     ///
@@ -720,40 +656,6 @@ pub trait TableExt<'lua> {
         K: ToLua<'lua>,
         A: ToLuaMulti<'lua>,
         R: FromLuaMulti<'lua>;
-
-    /// Gets the function associated to `key` from the table and asynchronously executes it,
-    /// passing the table itself along with `args` as function arguments and returning Future.
-    ///
-    /// Requires `feature = "async"`
-    ///
-    /// This might invoke the `__index` metamethod.
-    #[cfg(feature = "async")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "async")))]
-    fn call_async_method<'fut, K, A, R>(&self, key: K, args: A) -> LocalBoxFuture<'fut, Result<R>>
-    where
-        'lua: 'fut,
-        K: ToLua<'lua>,
-        A: ToLuaMulti<'lua>,
-        R: FromLuaMulti<'lua> + 'fut;
-
-    /// Gets the function associated to `key` from the table and asynchronously executes it,
-    /// passing `args` as function arguments and returning Future.
-    ///
-    /// Requires `feature = "async"`
-    ///
-    /// This might invoke the `__index` metamethod.
-    #[cfg(feature = "async")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "async")))]
-    fn call_async_function<'fut, K, A, R>(
-        &self,
-        key: K,
-        args: A,
-    ) -> LocalBoxFuture<'fut, Result<R>>
-    where
-        'lua: 'fut,
-        K: ToLua<'lua>,
-        A: ToLuaMulti<'lua>,
-        R: FromLuaMulti<'lua> + 'fut;
 }
 
 impl<'lua> TableExt<'lua> for Table<'lua> {
@@ -764,16 +666,6 @@ impl<'lua> TableExt<'lua> for Table<'lua> {
     {
         // Convert table to a function and call via pcall that respects the `__call` metamethod.
         Function(self.0.clone()).call(args)
-    }
-
-    #[cfg(feature = "async")]
-    fn call_async<'fut, A, R>(&self, args: A) -> LocalBoxFuture<'fut, Result<R>>
-    where
-        'lua: 'fut,
-        A: ToLuaMulti<'lua>,
-        R: FromLuaMulti<'lua> + 'fut,
-    {
-        Function(self.0.clone()).call_async(args)
     }
 
     fn call_method<K, A, R>(&self, key: K, args: A) -> Result<R>
@@ -795,37 +687,6 @@ impl<'lua> TableExt<'lua> for Table<'lua> {
         R: FromLuaMulti<'lua>,
     {
         self.get::<_, Function>(key)?.call(args)
-    }
-
-    #[cfg(feature = "async")]
-    fn call_async_method<'fut, K, A, R>(&self, key: K, args: A) -> LocalBoxFuture<'fut, Result<R>>
-    where
-        'lua: 'fut,
-        K: ToLua<'lua>,
-        A: ToLuaMulti<'lua>,
-        R: FromLuaMulti<'lua> + 'fut,
-    {
-        let lua = self.0.lua;
-        let mut args = match args.to_lua_multi(lua) {
-            Ok(args) => args,
-            Err(e) => return Box::pin(future::err(e)),
-        };
-        args.push_front(Value::Table(self.clone()));
-        self.call_async_function(key, args)
-    }
-
-    #[cfg(feature = "async")]
-    fn call_async_function<'fut, K, A, R>(&self, key: K, args: A) -> LocalBoxFuture<'fut, Result<R>>
-    where
-        'lua: 'fut,
-        K: ToLua<'lua>,
-        A: ToLuaMulti<'lua>,
-        R: FromLuaMulti<'lua> + 'fut,
-    {
-        match self.get::<_, Function>(key) {
-            Ok(func) => func.call_async(args),
-            Err(e) => Box::pin(future::err(e)),
-        }
     }
 }
 

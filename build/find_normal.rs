@@ -77,17 +77,4 @@ pub fn probe_lua() -> Option<PathBuf> {
             .get(0)
             .cloned()
     }
-
-    #[cfg(feature = "luajit")]
-    {
-        let lua = pkg_config::Config::new()
-            .range_version((Bound::Included("2.0.4"), Bound::Unbounded))
-            .cargo_metadata(need_lua_lib)
-            .probe("luajit");
-
-        lua.expect("cannot find LuaJIT using `pkg-config`")
-            .include_paths
-            .get(0)
-            .cloned()
-    }
 }

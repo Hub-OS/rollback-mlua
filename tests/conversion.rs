@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::{CStr, CString};
 
 use maplit::{btreemap, btreeset, hashmap, hashset};
-use mlua::{Error, Lua, Result};
+use rollback_mlua::{Error, Lua, Result};
 
 #[test]
 fn test_conv_vec() -> Result<()> {

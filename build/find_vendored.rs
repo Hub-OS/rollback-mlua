@@ -11,16 +11,6 @@ pub fn probe_lua() -> Option<PathBuf> {
     let artifacts = lua_src::Build::new().build(lua_src::Lua52);
     #[cfg(feature = "lua51")]
     let artifacts = lua_src::Build::new().build(lua_src::Lua51);
-    #[cfg(feature = "luajit")]
-    let artifacts = {
-        let mut builder = luajit_src::Build::new();
-        if cfg!(feature = "luajit52") {
-            builder.lua52compat(true);
-        }
-        builder.build()
-    };
-    #[cfg(feature = "luau")]
-    let artifacts = luau0_src::Build::new().build();
 
     artifacts.print_cargo_metadata();
 

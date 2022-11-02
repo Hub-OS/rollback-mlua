@@ -1,10 +1,12 @@
 use std::ptr;
 
-use mlua::{Lua, Result, Value};
+use rollback_mlua::{Lua, Result, StdLib, Value};
 
 #[test]
 fn test_value_eq() -> Result<()> {
     let lua = Lua::new();
+    lua.load_from_std_lib(StdLib::ALL_SAFE)?;
+
     let globals = lua.globals();
 
     lua.load(

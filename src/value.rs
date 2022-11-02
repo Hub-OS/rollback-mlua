@@ -1,7 +1,6 @@
-use std::iter::{self, FromIterator};
 use std::ops::Index;
 use std::os::raw::c_void;
-use std::{ptr, slice, str, vec};
+use std::{iter, ptr, slice, vec};
 
 #[cfg(feature = "serialize")]
 use {
@@ -16,11 +15,9 @@ use crate::function::Function;
 use crate::lua::Lua;
 use crate::string::String;
 use crate::table::Table;
-use crate::thread::Thread;
-use crate::types::{Integer, LightUserData, Number};
-use crate::userdata::AnyUserData;
+use crate::types::{Integer, Number};
 
-/// A dynamically typed Lua value. The `String`, `Table`, `Function`, `Thread`, and `UserData`
+/// A dynamically typed Lua value. The `String`, `Table`, and `Function`
 /// variants contain handle types into the internal Lua state. It is a logic error to mix handle
 /// types between separate `Lua` instances, and doing so will result in a panic.
 #[derive(Debug, Clone)]
@@ -29,18 +26,12 @@ pub enum Value<'lua> {
     Nil,
     /// The Lua value `true` or `false`.
     Boolean(bool),
-    /// A "light userdata" object, equivalent to a raw pointer.
-    LightUserData(LightUserData),
     /// An integer number.
     ///
     /// Any Lua number convertible to a `Integer` will be represented as this variant.
     Integer(Integer),
     /// A floating point number.
     Number(Number),
-    /// A Luau vector.
-    #[cfg(any(feature = "luau", doc))]
-    #[cfg_attr(docsrs, doc(cfg(feature = "luau")))]
-    Vector(f32, f32, f32),
     /// An interned string, managed by Lua.
     ///
     /// Unlike Rust strings, Lua strings may not be valid UTF-8.
@@ -49,11 +40,6 @@ pub enum Value<'lua> {
     Table(Table<'lua>),
     /// Reference to a Lua function (or closure).
     Function(Function<'lua>),
-    /// Reference to a Lua thread (or coroutine).
-    Thread(Thread<'lua>),
-    /// Reference to a userdata object that holds a custom type which implements `UserData`.
-    /// Special builtin userdata types will be represented as other `Value` variants.
-    UserData(AnyUserData<'lua>),
     /// `Error` is a special builtin userdata type. When received from Lua it is implicitly cloned.
     Error(Error),
 }
@@ -65,16 +51,11 @@ impl<'lua> Value<'lua> {
         match *self {
             Value::Nil => "nil",
             Value::Boolean(_) => "boolean",
-            Value::LightUserData(_) => "lightuserdata",
             Value::Integer(_) => "integer",
             Value::Number(_) => "number",
-            #[cfg(feature = "luau")]
-            Value::Vector(_, _, _) => "vector",
             Value::String(_) => "string",
             Value::Table(_) => "table",
             Value::Function(_) => "function",
-            Value::Thread(_) => "thread",
-            Value::UserData(_) => "userdata",
             Value::Error(_) => "error",
         }
     }
@@ -92,7 +73,6 @@ impl<'lua> Value<'lua> {
     pub fn equals<T: AsRef<Self>>(&self, other: T) -> Result<bool> {
         match (self, other.as_ref()) {
             (Value::Table(a), Value::Table(b)) => a.equals(b),
-            (Value::UserData(a), Value::UserData(b)) => a.equals(b),
             _ => Ok(self == other.as_ref()),
         }
     }
@@ -108,14 +88,9 @@ impl<'lua> Value<'lua> {
     pub fn to_pointer(&self) -> *const c_void {
         unsafe {
             match self {
-                Value::LightUserData(ud) => ud.0,
                 Value::Table(t) => t.to_pointer(),
                 Value::String(s) => s.to_pointer(),
-                Value::Function(Function(r))
-                | Value::Thread(Thread(r))
-                | Value::UserData(AnyUserData(r)) => {
-                    ffi::lua_topointer(r.lua.ref_thread(), r.index)
-                }
+                Value::Function(Function(v)) => ffi::lua_topointer(v.lua.ref_thread, v.index),
                 _ => ptr::null(),
             }
         }
@@ -127,18 +102,13 @@ impl<'lua> PartialEq for Value<'lua> {
         match (self, other) {
             (Value::Nil, Value::Nil) => true,
             (Value::Boolean(a), Value::Boolean(b)) => a == b,
-            (Value::LightUserData(a), Value::LightUserData(b)) => a == b,
             (Value::Integer(a), Value::Integer(b)) => *a == *b,
             (Value::Integer(a), Value::Number(b)) => *a as Number == *b,
             (Value::Number(a), Value::Integer(b)) => *a == *b as Number,
             (Value::Number(a), Value::Number(b)) => *a == *b,
-            #[cfg(feature = "luau")]
-            (Value::Vector(x1, y1, z1), Value::Vector(x2, y2, z2)) => (x1, y1, z1) == (x2, y2, z2),
             (Value::String(a), Value::String(b)) => a == b,
             (Value::Table(a), Value::Table(b)) => a == b,
             (Value::Function(a), Value::Function(b)) => a == b,
-            (Value::Thread(a), Value::Thread(b)) => a == b,
-            (Value::UserData(a), Value::UserData(b)) => a == b,
             _ => false,
         }
     }
@@ -165,13 +135,9 @@ impl<'lua> Serialize for Value<'lua> {
                 .serialize_i64((*i).try_into().expect("cannot convert lua_Integer to i64")),
             #[allow(clippy::useless_conversion)]
             Value::Number(n) => serializer.serialize_f64(*n),
-            #[cfg(feature = "luau")]
-            Value::Vector(x, y, z) => (x, y, z).serialize(serializer),
             Value::String(s) => s.serialize(serializer),
             Value::Table(t) => t.serialize(serializer),
-            Value::UserData(ud) => ud.serialize(serializer),
-            Value::LightUserData(ud) if ud.0.is_null() => serializer.serialize_none(),
-            Value::Error(_) | Value::LightUserData(_) | Value::Function(_) | Value::Thread(_) => {
+            Value::Error(_) | Value::Function(_) => {
                 let msg = format!("cannot serialize <{}>", self.type_name());
                 Err(ser::Error::custom(msg))
             }

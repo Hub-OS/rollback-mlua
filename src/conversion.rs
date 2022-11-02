@@ -15,9 +15,6 @@ use crate::function::Function;
 use crate::lua::Lua;
 use crate::string::String;
 use crate::table::Table;
-use crate::thread::Thread;
-use crate::types::{LightUserData, MaybeSend};
-use crate::userdata::{AnyUserData, UserData};
 use crate::value::{FromLua, Nil, ToLua, Value};
 
 impl<'lua> ToLua<'lua> for Value<'lua> {
@@ -96,69 +93,6 @@ impl<'lua> FromLua<'lua> for Function<'lua> {
     }
 }
 
-impl<'lua> ToLua<'lua> for Thread<'lua> {
-    #[inline]
-    fn to_lua(self, _: &'lua Lua) -> Result<Value<'lua>> {
-        Ok(Value::Thread(self))
-    }
-}
-
-impl<'lua> FromLua<'lua> for Thread<'lua> {
-    #[inline]
-    fn from_lua(value: Value<'lua>, _: &'lua Lua) -> Result<Thread<'lua>> {
-        match value {
-            Value::Thread(t) => Ok(t),
-            _ => Err(Error::FromLuaConversionError {
-                from: value.type_name(),
-                to: "thread",
-                message: None,
-            }),
-        }
-    }
-}
-
-impl<'lua> ToLua<'lua> for AnyUserData<'lua> {
-    #[inline]
-    fn to_lua(self, _: &'lua Lua) -> Result<Value<'lua>> {
-        Ok(Value::UserData(self))
-    }
-}
-
-impl<'lua> FromLua<'lua> for AnyUserData<'lua> {
-    #[inline]
-    fn from_lua(value: Value<'lua>, _: &'lua Lua) -> Result<AnyUserData<'lua>> {
-        match value {
-            Value::UserData(ud) => Ok(ud),
-            _ => Err(Error::FromLuaConversionError {
-                from: value.type_name(),
-                to: "userdata",
-                message: None,
-            }),
-        }
-    }
-}
-
-impl<'lua, T: 'static + MaybeSend + UserData> ToLua<'lua> for T {
-    #[inline]
-    fn to_lua(self, lua: &'lua Lua) -> Result<Value<'lua>> {
-        Ok(Value::UserData(lua.create_userdata(self)?))
-    }
-}
-
-impl<'lua, T: 'static + UserData + Clone> FromLua<'lua> for T {
-    #[inline]
-    fn from_lua(value: Value<'lua>, _: &'lua Lua) -> Result<T> {
-        match value {
-            Value::UserData(ud) => Ok(ud.borrow::<T>()?.clone()),
-            _ => Err(Error::FromLuaConversionError {
-                from: value.type_name(),
-                to: "userdata",
-                message: None,
-            }),
-        }
-    }
-}
-
 impl<'lua> ToLua<'lua> for Error {
     #[inline]
     fn to_lua(self, _: &'lua Lua) -> Result<Value<'lua>> {
@@ -194,27 +128,6 @@ impl<'lua> FromLua<'lua> for bool {
             Value::Nil => Ok(false),
             Value::Boolean(b) => Ok(b),
             _ => Ok(true),
-        }
-    }
-}
-
-impl<'lua> ToLua<'lua> for LightUserData {
-    #[inline]
-    fn to_lua(self, _: &'lua Lua) -> Result<Value<'lua>> {
-        Ok(Value::LightUserData(self))
-    }
-}
-
-impl<'lua> FromLua<'lua> for LightUserData {
-    #[inline]
-    fn from_lua(value: Value<'lua>, _: &'lua Lua) -> Result<Self> {
-        match value {
-            Value::LightUserData(ud) => Ok(ud),
-            _ => Err(Error::FromLuaConversionError {
-                from: value.type_name(),
-                to: "light userdata",
-                message: None,
-            }),
         }
     }
 }
@@ -487,17 +400,6 @@ where
     #[inline]
     fn from_lua(value: Value<'lua>, _lua: &'lua Lua) -> Result<Self> {
         match value {
-            #[cfg(feature = "luau")]
-            Value::Vector(x, y, z) if N == 3 => Ok(mlua_expect!(
-                vec![
-                    T::from_lua(Value::Number(x as _), _lua)?,
-                    T::from_lua(Value::Number(y as _), _lua)?,
-                    T::from_lua(Value::Number(z as _), _lua)?,
-                ]
-                .try_into()
-                .map_err(|_| ()),
-                "cannot convert vector to array"
-            )),
             Value::Table(table) => {
                 let vec = table.sequence_values().collect::<Result<Vec<_>>>()?;
                 vec.try_into()
@@ -541,12 +443,6 @@ impl<'lua, T: FromLua<'lua>> FromLua<'lua> for Vec<T> {
     #[inline]
     fn from_lua(value: Value<'lua>, _lua: &'lua Lua) -> Result<Self> {
         match value {
-            #[cfg(feature = "luau")]
-            Value::Vector(x, y, z) => Ok(vec![
-                T::from_lua(Value::Number(x as _), _lua)?,
-                T::from_lua(Value::Number(y as _), _lua)?,
-                T::from_lua(Value::Number(z as _), _lua)?,
-            ]),
             Value::Table(table) => table.sequence_values().collect(),
             _ => Err(Error::FromLuaConversionError {
                 from: value.type_name(),

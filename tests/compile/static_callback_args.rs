@@ -1,6 +1,6 @@
 use std::cell::RefCell;
 
-use mlua::{Lua, Result, Table};
+use rollback_mlua::{Lua, Result, Table};
 
 fn main() -> Result<()> {
     thread_local! {

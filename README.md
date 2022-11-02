@@ -1,273 +1,209 @@
-# mlua
-[![Build Status]][github-actions] [![Latest Version]][crates.io] [![API Documentation]][docs.rs] [![Coverage Status]][codecov.io] ![MSRV]
+# Rollback mlua
 
-[Build Status]: https://github.com/khvzak/mlua/workflows/CI/badge.svg
-[github-actions]: https://github.com/khvzak/mlua/actions
-[Latest Version]: https://img.shields.io/crates/v/mlua.svg
-[crates.io]: https://crates.io/crates/mlua
-[API Documentation]: https://docs.rs/mlua/badge.svg
-[docs.rs]: https://docs.rs/mlua
-[Coverage Status]: https://codecov.io/gh/khvzak/mlua/branch/master/graph/badge.svg?token=99339FS1CG
-[codecov.io]: https://codecov.io/gh/khvzak/mlua
-[MSRV]: https://img.shields.io/badge/rust-1.56+-brightgreen.svg?&logo=rust
+Slimmed down [mlua](https://github.com/khvzak/mlua) built for rollback, anything unsafe for rolling back has been removed.
 
-[Guided Tour] | [Benchmarks] | [FAQ]
+## Major Differences:
 
-[Guided Tour]: examples/guided_tour.rs
-[Benchmarks]: https://github.com/khvzak/script-bench-rs
-[FAQ]: FAQ.md
+- LuaJIT + Luau support dropped
+- `Lua::new_rollback(memory_size: usize, max_snapshots: usize)`
+- `lua.snap()`
+- `lua.rollback(n: usize)` where n should be 1..max_snapshots
+- Custom UserData/LightUserData support has been dropped
+- Removed coroutines/threads/async from mlua reducing feature scope
 
-`mlua` is bindings to [Lua](https://www.lua.org) programming language for Rust with a goal to provide
-_safe_ (as far as it's possible), high level, easy to use, practical and flexible API.
+## How is safety provided?
 
-Started as `rlua` fork, `mlua` supports Lua 5.4, 5.3, 5.2, 5.1 (including LuaJIT) and [Roblox Luau] and allows to write native Lua modules in Rust as well as use Lua in a standalone mode.
+lua.snap() and lua.rollback(n) take a mutable reference to lua, other functions are immutable.
+Base mlua has no mutable functions on relevant structs.
+Rust does not allow for mutable and immutable references to overlap.
 
-`mlua` tested on Windows/macOS/Linux including module mode in [GitHub Actions] on `x86_64` platform and cross-compilation to `aarch64` (other targets are also supported).
+```rust
+fn main() -> LuaResult<()> {
+    let mut lua = Lua::new_rollback(1024 * 1024, 1);
 
-[GitHub Actions]: https://github.com/khvzak/mlua/actions
-[Roblox Luau]: https://luau-lang.org
+    lua.snap();
 
-## Usage
+    let table = lua.create_table()?;
+    table.set("value", 1)?;
 
-### Feature flags
+    // Rollback to before the table was created
+    lua.rollback(1);
 
-`mlua` uses feature flags to reduce the amount of dependencies, compiled code and allow to choose only required set of features.
-Below is a list of the available feature flags. By default `mlua` does not enable any features.
+    // Does not compile, lua.rollback() requires mutable reference, table is an immutable reference to lua.
+    let value = table.get("value")?;
+    println!("{}", value);
 
-* `lua54`: activate Lua [5.4] support
-* `lua53`: activate Lua [5.3] support
-* `lua52`: activate Lua [5.2] support
-* `lua51`: activate Lua [5.1] support
-* `luajit`: activate [LuaJIT] support
-* `luajit52`: activate [LuaJIT] support with partial compatibility with Lua 5.2
-* `luau`: activate [Luau] support (auto vendored mode)
-* `vendored`: build static Lua(JIT) library from sources during `mlua` compilation using [lua-src] or [luajit-src] crates
-* `module`: enable module mode (building loadable `cdylib` library for Lua)
-* `async`: enable async/await support (any executor can be used, eg. [tokio] or [async-std])
-* `send`: make `mlua::Lua` transferable across thread boundaries (adds [`Send`] requirement to `mlua::Function` and `mlua::UserData`)
-* `serialize`: add serialization and deserialization support to `mlua` types using [serde] framework
-* `macros`: enable procedural macros (such as `chunk!`)
-* `parking_lot`: support UserData types wrapped in [parking_lot]'s primitives (`Arc<Mutex>` and `Arc<RwLock>`)
-
-[5.4]: https://www.lua.org/manual/5.4/manual.html
-[5.3]: https://www.lua.org/manual/5.3/manual.html
-[5.2]: https://www.lua.org/manual/5.2/manual.html
-[5.1]: https://www.lua.org/manual/5.1/manual.html
-[LuaJIT]: https://luajit.org/
-[Luau]: https://github.com/Roblox/luau
-[lua-src]: https://github.com/khvzak/lua-src-rs
-[luajit-src]: https://github.com/khvzak/luajit-src-rs
-[tokio]: https://github.com/tokio-rs/tokio
-[async-std]: https://github.com/async-rs/async-std
-[`Send`]: https://doc.rust-lang.org/std/marker/trait.Send.html
-[serde]: https://github.com/serde-rs/serde
-[parking_lot]: https://github.com/Amanieu/parking_lot
-
-### Async/await support
-
-`mlua` supports async/await for all Lua versions including Luau.
-
-This works using Lua [coroutines](https://www.lua.org/manual/5.3/manual.html#2.6) and require running [Thread](https://docs.rs/mlua/latest/mlua/struct.Thread.html) along with enabling `feature = "async"` in `Cargo.toml`.
-
-**Examples**:
-- [HTTP Client](examples/async_http_client.rs)
-- [HTTP Client (json)](examples/async_http_reqwest.rs)
-- [HTTP Server](examples/async_http_server.rs)
-- [TCP Server](examples/async_tcp_server.rs)
-
-### Serialization (serde) support
-
-With `serialize` feature flag enabled, `mlua` allows you to serialize/deserialize any type that implements [`serde::Serialize`] and [`serde::Deserialize`] into/from [`mlua::Value`]. In addition `mlua` provides [`serde::Serialize`] trait implementation for it (including `UserData` support).
-
-[Example](examples/serialize.rs)
-
-[`serde::Serialize`]: https://docs.serde.rs/serde/ser/trait.Serialize.html
-[`serde::Deserialize`]: https://docs.serde.rs/serde/de/trait.Deserialize.html
-[`mlua::Value`]: https://docs.rs/mlua/latest/mlua/enum.Value.html
-
-### Compiling
-
-You have to enable one of the features: `lua54`, `lua53`, `lua52`, `lua51`, `luajit(52)` or `luau`, according to the chosen Lua version.
-
-By default `mlua` uses `pkg-config` tool to find lua includes and libraries for the chosen Lua version.
-In most cases it works as desired, although sometimes could be more preferable to use a custom lua library.
-To achieve this, mlua supports `LUA_INC`, `LUA_LIB`, `LUA_LIB_NAME` and `LUA_LINK` environment variables.
-`LUA_LINK` is optional and may be `dylib` (a dynamic library) or `static` (a static library, `.a` archive).
-
-An example how to use them:
-``` sh
-my_project $ LUA_INC=$HOME/tmp/lua-5.2.4/src LUA_LIB=$HOME/tmp/lua-5.2.4/src LUA_LIB_NAME=lua LUA_LINK=static cargo build
+    Ok(())
+}
 ```
 
-`mlua` also supports vendored lua/luajit using the auxiliary crates [lua-src](https://crates.io/crates/lua-src) and
-[luajit-src](https://crates.io/crates/luajit-src).
-Just enable the `vendored` feature and cargo will automatically build and link specified lua/luajit version. This is the easiest way to get started with `mlua`.
+Callbacks provide immutable access to lua preventing snapshot/rollback within a callback.
 
-### Standalone mode
-In a standalone mode `mlua` allows to add to your application scripting support with a gently configured Lua runtime to ensure  safety and soundness.
+```rust
+fn main() -> LuaResult<()> {
+    let mut lua = Lua::new_rollback(1024 * 1024, 1);
 
-Add to `Cargo.toml` :
+    lua.snap();
 
-``` toml
-[dependencies]
-mlua = { version = "0.8", features = ["lua54", "vendored"] }
+    lua.create_function(|lua: &Lua, _: ()| {
+        // Does not compile, lua is immutable
+        lua.rollback(1);
+        Ok(())
+    })?.call(());
+
+    lua.create_function(|_, _: ()| {
+        // Does not compile, can't take mutable reference to lua while create_function requires immutable reference
+        // Even if it did take a mutable reference, Rust does not allow for more than one mutable reference at a time
+        lua.rollback(1);
+        Ok(())
+    })?.call(());
+
+    lua.create_function(move |_, _: ()| {
+        // Does not compile, we can't move lua into lua
+        lua.rollback(1);
+        Ok(())
+    })?.call(());
+
+    Ok(())
+}
 ```
 
-`main.rs`
+Registry keys are the only way to keep a reference to a value past the mutable function line.
+However rolling back to a snapshot
 
-``` rust
-use mlua::prelude::*;
+```rust
+// a test exists for this:
+// tests/rollback.rs: fn test_registry()
 
 fn main() -> LuaResult<()> {
-    let lua = Lua::new();
+    let mut lua = Lua::new_rollback(1024 * 1024, 1);
 
-    let map_table = lua.create_table()?;
-    map_table.set(1, "one")?;
-    map_table.set("two", 2)?;
+    lua.snap();
 
-    lua.globals().set("map_table", map_table)?;
+    let key = lua.create_registry_value(1)?;
 
-    lua.load("for k,v in pairs(map_table) do print(k,v) end").exec()?;
+    lua.snap();
+
+    // Rollback to a safe point
+    lua.rollback(1);
+
+    // Perfectly valid use
+    lua.registry_value(&key)?;
+
+    // Rollback to before the value was created
+    lua.rollback(1);
+
+    // Returns an Err, as the registry key has been invalidated
+    lua.registry_value(&key)?;
 
     Ok(())
 }
 ```
 
-### Module mode
-In a module mode `mlua` allows to create a compiled Lua module that can be loaded from Lua code using [`require`](https://www.lua.org/manual/5.4/manual.html#pdf-require). In this case `mlua` uses an external Lua runtime which could lead to potential unsafety due to unpredictability of the Lua environment and usage of libraries such as [`debug`](https://www.lua.org/manual/5.4/manual.html#6.10).
+Removal of UserData prevents use after free and double frees from external values.
+As a bonus it also prevents external values ignoring rollback, sadly Rust closures will still have this issue.
 
-[Example](examples/module)
+```rust
+// Example purposes only, this does not compile as the UserData trait has been removed
 
-Add to `Cargo.toml` :
+struct MyUserData(Arc<i32>);
 
-``` toml
-[lib]
-crate-type = ["cdylib"]
+impl UserData for MyUserData {}
 
-[dependencies]
-mlua = { version = "0.8", features = ["lua54", "vendored", "module"] }
-```
+fn main() -> LuaResult<()> {
+    let mut lua = Lua::new_rollback(1024 * 1024, 1);
 
-`lib.rs` :
+    // Arc points to data outside of lua's memory
+    lua.globals().set("myobject", MyUserData(Arc::new(1)))?;
 
-``` rust
-use mlua::prelude::*;
+    lua.snap();
 
-fn hello(_: &Lua, name: String) -> LuaResult<()> {
-    println!("hello, {}!", name);
+    // Modify the value
+    let value: MyUserData = lua.globals().get("myobject")?;
+    *value.0 = 2;
+
+    // Roll to before the value was modified
+    lua.rollback(1);
+
+    // If this could compile, the value would not roll back since rollback only applies to memory in the VM
+    let value: MyUserData = lua.globals().get("myobject")?;
+    println!("{}", value.0); // 2
+
+    // Free the object by setting to nil, then collecting garbage
+    lua.globals().set("myobject", Nil)?;
+    lua.gc_collect()?;
+    lua.gc_collect()?;
+
+    // Roll to before the value was deleted
+    lua.rollback(1);
+
+    let value: MyUserData = lua.globals().get("myobject")?;
+
+    // Use after free! Good thing UserData has been removed
+    println!("{}", value.0);
+
+    // Double free! Good thing UserData has been removed
+    lua.globals().set("myobject", Nil)?;
+    lua.gc_collect()?;
+    lua.gc_collect()?;
+
     Ok(())
 }
+```
 
-#[mlua::lua_module]
-fn my_module(lua: &Lua) -> LuaResult<LuaTable> {
-    let exports = lua.create_table()?;
-    exports.set("hello", lua.create_function(hello)?)?;
-    Ok(exports)
+Functions (and Errors) have usage tracked across snapshots to prevent double frees and memory leaks.
+
+lua.create_function_mut has been removed as rust closures will not roll back (the data is not stored in the VM as functions are Boxed before passed to lua)
+
+```rust
+fn main() -> LuaResult<()> {
+    let mut lua = Lua::new_rollback(1024 * 1024, 2);
+
+    lua.snap();
+
+    // create_function_mut has been removed, interior mutability is the only way around this protection
+    let mut i = RefCell::new(0);
+    let mut boxed_value: Box<i32> = Box::new(1);
+
+    // create_function_mut has been removed
+    let fun = lua.create_function(move |lua: &Lua, _: ()| {
+        // This operation has issues with rollback!
+        *i.borrow_mut() += 1;
+
+        // Capturing boxed_value, as an example of how a double free could occur without protection
+        Ok(*boxed_value)
+    })?;
+
+    lua.globals().set("fun", fun)?;
+
+    lua.snap();
+
+    // Free the object by setting to nil, then collecting garbage
+    lua.globals().set("fun", Nil)?;
+    lua.gc_collect()?;
+    lua.gc_collect()?;
+
+    lua.rollback(1);
+
+    // No double free
+    lua.globals().set("fun", Nil)?;
+    lua.gc_collect()?;
+    lua.gc_collect()?;
+
+    // Rolling back to before the function was created, this will free the function
+    lua.rollback(2);
+
+    // Creating enough snapshots to destroy the last usage would also free the function
+    lua.snap();
+    lua.snap();
+
+    // Destruction of Lua would also free the function
+    Ok(())
 }
 ```
 
-And then (**macOS** example):
+## Known Remaining Issues
 
-``` sh
-$ cargo rustc -- -C link-arg=-undefined -C link-arg=dynamic_lookup
-$ ln -s ./target/debug/libmy_module.dylib ./my_module.so
-$ lua5.4 -e 'require("my_module").hello("world")'
-hello, world!
-```
-
-On macOS, you need to set additional linker arguments. One option is to compile with `cargo rustc --release -- -C link-arg=-undefined -C link-arg=dynamic_lookup`, the other is to create a `.cargo/config` with the following content:
-``` toml
-[target.x86_64-apple-darwin]
-rustflags = [
-  "-C", "link-arg=-undefined",
-  "-C", "link-arg=dynamic_lookup",
-]
-
-[target.aarch64-apple-darwin]
-rustflags = [
-  "-C", "link-arg=-undefined",
-  "-C", "link-arg=dynamic_lookup",
-]
-```
-On Linux you can build modules normally with `cargo build --release`.
-Vendored and non-vendored builds are supported for these OS.
-
-On Windows `vendored` mode for modules is not supported since you need to link to a Lua dll.
-Easiest way is to use either MinGW64 (as part of [MSYS2](https://github.com/msys2/msys2) package) with `pkg-config` or
-MSVC with `LUA_INC` / `LUA_LIB` / `LUA_LIB_NAME` environment variables.
-
-More details about compiling and linking Lua modules can be found on the [Building Modules](http://lua-users.org/wiki/BuildingModules) page.
-
-### Publishing to luarocks.org
-
-There is a LuaRocks build backend for mlua modules [`luarocks-build-rust-mlua`].
-
-Modules written in Rust and published to luarocks:
-- [`lua-ryaml`](https://github.com/khvzak/lua-ryaml)
-
-[`luarocks-build-rust-mlua`]: https://luarocks.org/modules/khvzak/luarocks-build-rust-mlua
-
-## Safety
-
-One of the `mlua` goals is to provide *safe* API between Rust and Lua.
-Every place where the Lua C API may trigger an error longjmp in any way is protected by `lua_pcall`,
-and the user of the library is protected from directly interacting with unsafe things like the Lua stack,
-and there is overhead associated with this safety.
-
-Unfortunately, `mlua` does not provide absolute safety even without using `unsafe` .
-This library contains a huge amount of unsafe code. There are almost certainly bugs still lurking in this library!
-It is surprisingly, fiendishly difficult to use the Lua C API without the potential for unsafety.
-
-## Panic handling
-
-`mlua` wraps panics that are generated inside Rust callbacks in a regular Lua error. Panics could be
-resumed then by returning or propagating the Lua error to Rust code.
-
-For example:
-``` rust
-let lua = Lua::new();
-let f = lua.create_function(|_, ()| -> LuaResult<()> {
-    panic!("test panic");
-})?;
-lua.globals().set("rust_func", f)?;
-
-let _ = lua.load(r#"
-    local status, err = pcall(rust_func)
-    print(err) -- prints: test panic
-    error(err) -- propagate panic
-"#).exec();
-
-unreachable!()
-```
-
-Optionally `mlua` can disable Rust panics catching in Lua via `pcall`/`xpcall` and automatically resume
-them across the Lua API boundary. This is controlled via `LuaOptions` and done by wrapping the Lua `pcall`/`xpcall`
-functions on a way to prevent catching errors that are wrapped Rust panics.
-
-`mlua` should also be panic safe in another way as well, which is that any `Lua` instances or handles
-remains usable after a user generated panic, and such panics should not break internal invariants or
-leak Lua stack space. This is mostly important to safely use `mlua` types in Drop impls, as you should not be
-using panics for general error handling.
-
-Below is a list of `mlua` behaviors that should be considered a bug.
-If you encounter them, a bug report would be very welcome:
-
-  + If you can cause UB with `mlua` without typing the word "unsafe", this is a bug.
-
-  + If your program panics with a message that contains the string "mlua internal error", this is a bug.
-
-  + Lua C API errors are handled by longjmp. All instances where the Lua C API would otherwise longjmp over calling stack frames should be guarded against, except in internal callbacks where this is intentional. If you detect that `mlua` is triggering a longjmp over your Rust stack frames, this is a bug!
-
-  + If you detect that, after catching a panic or during a Drop triggered from a panic, a `Lua` or handle method is triggering other bugs or there is a Lua stack space leak, this is a bug. `mlua` instances are supposed to remain fully usable in the face of user generated panics. This guarantee does not extend to panics marked with "mlua internal error" simply because that is already indicative of a separate bug.
-
-## Sandboxing
-
-Please check the [Luau Sandboxing] page if you are interested in running untrusted Lua scripts in controlled environment.
-
-`mlua` provides `Lua::sandbox` method for enabling sandbox mode (Luau only).
-
-[Luau Sandboxing]: https://luau-lang.org/sandbox
-
-## License
-
-This project is licensed under the [MIT license](LICENSE)
+- Multithreading is untested, I'm uncertain of RegistryKey's usage of AtomicBool.
+- StdLib::COROUTINE is available for use, however the test_multi_states test is not passing.
+- Tests in `tests/compile` should be adjusted for mlua and rollback_mlua project differences.

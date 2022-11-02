@@ -1,4 +1,4 @@
-use mlua::{Function, Lua, Result, String};
+use rollback_mlua::{Function, Lua, Result, String};
 
 #[test]
 fn test_function() -> Result<()> {
@@ -83,26 +83,8 @@ fn test_rust_function() -> Result<()> {
 }
 
 #[test]
-fn test_c_function() -> Result<()> {
-    let lua = Lua::new();
-
-    unsafe extern "C" fn c_function(state: *mut mlua::lua_State) -> std::os::raw::c_int {
-        let lua = Lua::init_from_ptr(state);
-        lua.globals().set("c_function", true).unwrap();
-        0
-    }
-
-    let func = unsafe { lua.create_c_function(c_function)? };
-    func.call(())?;
-    assert_eq!(lua.globals().get::<_, bool>("c_function")?, true);
-
-    Ok(())
-}
-
-#[cfg(not(feature = "luau"))]
-#[test]
 fn test_dump() -> Result<()> {
-    let lua = unsafe { Lua::unsafe_new() };
+    let lua = Lua::new();
 
     let concat_lua = lua
         .load(r#"function(arg1, arg2) return arg1 .. arg2 end"#)
@@ -134,11 +116,8 @@ fn test_function_info() -> Result<()> {
     let function3 = lua.create_function(|_, ()| Ok(()))?;
 
     let function1_info = function1.info();
-    #[cfg(feature = "luau")]
-    assert_eq!(function1_info.name, Some(b"function1".to_vec()));
     assert_eq!(function1_info.source, Some(b"source1".to_vec()));
     assert_eq!(function1_info.line_defined, 2);
-    #[cfg(not(feature = "luau"))]
     assert_eq!(function1_info.last_line_defined, 4);
     assert_eq!(function1_info.what, Some(b"Lua".to_vec()));
 
@@ -146,7 +125,6 @@ fn test_function_info() -> Result<()> {
     assert_eq!(function2_info.name, None);
     assert_eq!(function2_info.source, Some(b"source1".to_vec()));
     assert_eq!(function2_info.line_defined, 3);
-    #[cfg(not(feature = "luau"))]
     assert_eq!(function2_info.last_line_defined, 3);
     assert_eq!(function2_info.what, Some(b"Lua".to_vec()));
 
@@ -154,13 +132,10 @@ fn test_function_info() -> Result<()> {
     assert_eq!(function3_info.name, None);
     assert_eq!(function3_info.source, Some(b"=[C]".to_vec()));
     assert_eq!(function3_info.line_defined, -1);
-    #[cfg(not(feature = "luau"))]
     assert_eq!(function3_info.last_line_defined, -1);
     assert_eq!(function3_info.what, Some(b"C".to_vec()));
 
     let print_info = globals.get::<_, Function>("print")?.info();
-    #[cfg(feature = "luau")]
-    assert_eq!(print_info.name, Some(b"print".to_vec()));
     assert_eq!(print_info.source, Some(b"=[C]".to_vec()));
     assert_eq!(print_info.what, Some(b"C".to_vec()));
     assert_eq!(print_info.line_defined, -1);

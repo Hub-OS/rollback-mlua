@@ -1,4 +1,4 @@
-use mlua::{AnyUserData, Lua, Table, UserData, Result};
+use rollback_mlua::{AnyUserData, Lua, Result, Table, UserData};
 
 fn main() -> Result<()> {
     let lua = Lua::new();

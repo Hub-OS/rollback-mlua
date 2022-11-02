@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 use std::collections::HashSet;
 
-use mlua::{Lua, Result, String};
+use rollback_mlua::{Lua, Result, String};
 
 #[test]
 fn test_string_compare() {
@@ -14,7 +14,7 @@ fn test_string_compare() {
     with_str("teststring", |t| assert_eq!(t, b"teststring")); // &[u8]
     with_str("teststring", |t| assert_eq!(t, b"teststring".to_vec())); // Vec<u8>
     with_str("teststring", |t| assert_eq!(t, "teststring".to_string())); // String
-    with_str("teststring", |t| assert_eq!(t, t)); // mlua::String
+    with_str("teststring", |t| assert_eq!(t, t)); // rollback_mlua::String
     with_str("teststring", |t| {
         assert_eq!(t, Cow::from(b"teststring".as_ref()))
     }); // Cow (borrowed)

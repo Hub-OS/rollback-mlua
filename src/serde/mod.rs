@@ -1,7 +1,6 @@
 //! (De)Serialization support using serde.
 
 use std::os::raw::c_void;
-use std::ptr;
 
 use serde::{Deserialize, Serialize};
 
@@ -9,36 +8,12 @@ use crate::error::Result;
 use crate::ffi;
 use crate::lua::Lua;
 use crate::table::Table;
-use crate::types::LightUserData;
 use crate::util::check_stack;
 use crate::value::Value;
 
 /// Trait for serializing/deserializing Lua values using Serde.
 #[cfg_attr(docsrs, doc(cfg(feature = "serialize")))]
 pub trait LuaSerdeExt<'lua> {
-    /// A special value (lightuserdata) to encode/decode optional (none) values.
-    ///
-    /// Requires `feature = "serialize"`
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use std::collections::HashMap;
-    /// use mlua::{Lua, Result, LuaSerdeExt};
-    ///
-    /// fn main() -> Result<()> {
-    ///     let lua = Lua::new();
-    ///     lua.globals().set("null", lua.null())?;
-    ///
-    ///     let val = lua.load(r#"{a = null}"#).eval()?;
-    ///     let map: HashMap<String, Option<String>> = lua.from_value(val)?;
-    ///     assert_eq!(map["a"], None);
-    ///
-    ///     Ok(())
-    /// }
-    /// ```
-    fn null(&'lua self) -> Value<'lua>;
-
     /// A metatable attachable to a Lua table to systematically encode it as Array (instead of Map).
     /// As result, encoded Array will contain only sequence part of the table, with the same length
     /// as the `#` operator on that table.
@@ -48,7 +23,7 @@ pub trait LuaSerdeExt<'lua> {
     /// # Example
     ///
     /// ```
-    /// use mlua::{Lua, Result, LuaSerdeExt};
+    /// use rollback_mlua::{Lua, Result, LuaSerdeExt};
     /// use serde_json::Value as JsonValue;
     ///
     /// fn main() -> Result<()> {
@@ -79,7 +54,7 @@ pub trait LuaSerdeExt<'lua> {
     /// # Example
     ///
     /// ```
-    /// use mlua::{Lua, Result, LuaSerdeExt};
+    /// use rollback_mlua::{Lua, Result, LuaSerdeExt};
     /// use serde::Serialize;
     ///
     /// #[derive(Serialize)]
@@ -112,7 +87,7 @@ pub trait LuaSerdeExt<'lua> {
     /// # Example
     ///
     /// ```
-    /// use mlua::{Lua, Result, LuaSerdeExt, SerializeOptions};
+    /// use rollback_mlua::{Lua, Result, LuaSerdeExt, SerializeOptions};
     ///
     /// fn main() -> Result<()> {
     ///     let lua = Lua::new();
@@ -139,7 +114,7 @@ pub trait LuaSerdeExt<'lua> {
     /// # Example
     ///
     /// ```
-    /// use mlua::{Lua, Result, LuaSerdeExt};
+    /// use rollback_mlua::{Lua, Result, LuaSerdeExt};
     /// use serde::Deserialize;
     ///
     /// #[derive(Deserialize, Debug, PartialEq)]
@@ -170,7 +145,7 @@ pub trait LuaSerdeExt<'lua> {
     /// # Example
     ///
     /// ```
-    /// use mlua::{Lua, Result, LuaSerdeExt, DeserializeOptions};
+    /// use rollback_mlua::{Lua, Result, LuaSerdeExt, DeserializeOptions};
     /// use serde::Deserialize;
     ///
     /// #[derive(Deserialize, Debug, PartialEq)]
@@ -199,13 +174,9 @@ pub trait LuaSerdeExt<'lua> {
 }
 
 impl<'lua> LuaSerdeExt<'lua> for Lua {
-    fn null(&'lua self) -> Value<'lua> {
-        Value::LightUserData(LightUserData(ptr::null_mut()))
-    }
-
     fn array_metatable(&'lua self) -> Table<'lua> {
         unsafe {
-            push_array_metatable(self.ref_thread());
+            push_array_metatable(self.ref_thread);
             Table(self.pop_ref_thread())
         }
     }

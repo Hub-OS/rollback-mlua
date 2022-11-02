@@ -2,25 +2,15 @@
 
 use std::collections::HashMap;
 
-use mlua::{
-    DeserializeOptions, Error, Lua, LuaSerdeExt, Result as LuaResult, SerializeOptions, UserData,
-    Value,
+use rollback_mlua::{
+    DeserializeOptions, Error, Lua, LuaSerdeExt, Result as LuaResult, SerializeOptions, Value,
 };
 use serde::{Deserialize, Serialize};
 
 #[test]
 fn test_serialize() -> Result<(), Box<dyn std::error::Error>> {
-    #[derive(Serialize)]
-    struct MyUserData(i64, String);
-
-    impl UserData for MyUserData {}
-
     let lua = Lua::new();
     let globals = lua.globals();
-
-    let ud = lua.create_ser_userdata(MyUserData(123, "test userdata".into()))?;
-    globals.set("ud", ud)?;
-    globals.set("null", lua.null())?;
 
     let empty_array = lua.create_table()?;
     empty_array.set_metatable(Some(lua.array_metatable()));
@@ -35,10 +25,8 @@ fn test_serialize() -> Result<(), Box<dyn std::error::Error>> {
             _number = 321.99,
             _string = "test string serialization",
             _table_arr = {nil, "value 1", nil, "value 2", {}},
-            _table_map = {["table"] = "map", ["null"] = null},
+            _table_map = {["table"] = "map"},
             _bytes = "\240\040\140\040",
-            _userdata = ud,
-            _null = null,
             _empty_map = {},
             _empty_array = empty_array,
         }
@@ -52,10 +40,8 @@ fn test_serialize() -> Result<(), Box<dyn std::error::Error>> {
         "_number": 321.99,
         "_string": "test string serialization",
         "_table_arr": [null, "value 1", null, "value 2", {}],
-        "_table_map": {"table": "map", "null": null},
+        "_table_map": {"table": "map"},
         "_bytes": [240, 40, 140, 40],
-        "_userdata": [123, "test userdata"],
-        "_null": null,
         "_empty_map": {},
         "_empty_array": [],
     });
@@ -71,98 +57,14 @@ fn test_serialize() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
-fn test_serialize_in_scope() -> LuaResult<()> {
-    #[derive(Serialize, Clone)]
-    struct MyUserData(i64, String);
-
-    impl UserData for MyUserData {}
-
-    let lua = Lua::new();
-    lua.scope(|scope| {
-        let ud = scope.create_ser_userdata(MyUserData(-5, "test userdata".into()))?;
-        assert_eq!(
-            serde_json::to_value(&ud).unwrap(),
-            serde_json::json!((-5, "test userdata"))
-        );
-        Ok(())
-    })?;
-
-    lua.scope(|scope| {
-        let ud = scope.create_ser_userdata(MyUserData(-5, "test userdata".into()))?;
-        lua.globals().set("ud", ud)
-    })?;
-    let val = lua.load("ud").eval::<Value>()?;
-    match serde_json::to_value(&val) {
-        Ok(v) => panic!("expected destructed error, got {}", v),
-        Err(e) if e.to_string().contains("destructed") => {}
-        Err(e) => panic!("expected destructed error, got {}", e),
-    }
-
-    struct MyUserDataRef<'a>(&'a ());
-
-    impl<'a> UserData for MyUserDataRef<'a> {}
-
-    lua.scope(|scope| {
-        let ud = scope.create_nonstatic_userdata(MyUserDataRef(&()))?;
-        match serde_json::to_value(&ud) {
-            Ok(v) => panic!("expected serialization error, got {}", v),
-            Err(serde_json::Error { .. }) => {}
-        };
-        Ok(())
-    })?;
-
-    Ok(())
-}
-
-#[test]
 fn test_serialize_failure() -> Result<(), Box<dyn std::error::Error>> {
-    #[derive(Serialize)]
-    struct MyUserData(i64);
-
-    impl UserData for MyUserData {}
-
     let lua = Lua::new();
-
-    let ud = Value::UserData(lua.create_userdata(MyUserData(123))?);
-    match serde_json::to_value(&ud) {
-        Ok(v) => panic!("expected serialization error, got {}", v),
-        Err(serde_json::Error { .. }) => {}
-    }
 
     let func = lua.create_function(|_, _: ()| Ok(()))?;
     match serde_json::to_value(&Value::Function(func.clone())) {
         Ok(v) => panic!("expected serialization error, got {}", v),
         Err(serde_json::Error { .. }) => {}
     }
-
-    let thr = lua.create_thread(func)?;
-    match serde_json::to_value(&Value::Thread(thr)) {
-        Ok(v) => panic!("expected serialization error, got {}", v),
-        Err(serde_json::Error { .. }) => {}
-    }
-
-    Ok(())
-}
-
-#[cfg(feature = "luau")]
-#[test]
-fn test_serialize_vector() -> Result<(), Box<dyn std::error::Error>> {
-    let lua = Lua::new();
-
-    let globals = lua.globals();
-    globals.set(
-        "vector",
-        lua.create_function(|_, (x, y, z)| Ok(Value::Vector(x, y, z)))?,
-    )?;
-
-    let val = lua.load("{_vector = vector(1, 2, 3)}").eval::<Value>()?;
-    let json = serde_json::json!({
-        "_vector": [1.0, 2.0, 3.0],
-    });
-    assert_eq!(serde_json::to_value(&val)?, json);
-
-    let expected_json = lua.from_value::<serde_json::Value>(val)?;
-    assert_eq!(expected_json, json);
 
     Ok(())
 }
@@ -171,7 +73,6 @@ fn test_serialize_vector() -> Result<(), Box<dyn std::error::Error>> {
 fn test_to_value_struct() -> LuaResult<()> {
     let lua = Lua::new();
     let globals = lua.globals();
-    globals.set("null", lua.null())?;
 
     #[derive(Serialize)]
     struct Test {
@@ -238,7 +139,6 @@ fn test_to_value_enum() -> LuaResult<()> {
 fn test_to_value_with_options() -> Result<(), Box<dyn std::error::Error>> {
     let lua = Lua::new();
     let globals = lua.globals();
-    globals.set("null", lua.null())?;
 
     // set_array_metatable
     let data = lua.to_value_with(
@@ -272,10 +172,7 @@ fn test_to_value_with_options() -> Result<(), Box<dyn std::error::Error>> {
         unit: (),
         unitstruct: UnitStruct,
     };
-    let data2 = lua.to_value_with(
-        &mydata,
-        SerializeOptions::new().serialize_none_to_null(false),
-    )?;
+    let data2 = lua.to_value(&mydata)?;
     globals.set("data2", data2)?;
     lua.load(
         r#"
@@ -287,10 +184,7 @@ fn test_to_value_with_options() -> Result<(), Box<dyn std::error::Error>> {
     .exec()?;
 
     // serialize_unit_to_null
-    let data3 = lua.to_value_with(
-        &mydata,
-        SerializeOptions::new().serialize_unit_to_null(false),
-    )?;
+    let data3 = lua.to_value(&mydata)?;
     globals.set("data3", data3)?;
     lua.load(
         r#"
@@ -422,7 +316,6 @@ fn test_from_value_enum() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn test_from_value_enum_untagged() -> Result<(), Box<dyn std::error::Error>> {
     let lua = Lua::new();
-    lua.globals().set("null", lua.null())?;
 
     #[derive(Deserialize, PartialEq, Debug)]
     #[serde(untagged)]

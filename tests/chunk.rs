@@ -1,7 +1,7 @@
 use std::fs;
 use std::io;
 
-use mlua::{Error, Lua, Result};
+use rollback_mlua::{Error, Lua, Result};
 
 #[test]
 fn test_chunk_path() -> Result<()> {
@@ -39,7 +39,7 @@ fn test_chunk_macro() -> Result<()> {
 
     lua.globals().set("g", 123)?;
 
-    lua.load(mlua::chunk! {
+    lua.load(rollback_mlua::chunk! {
         assert($name == "Rustacean")
         assert($table[1] == 1)
         assert($data.num == 1)
