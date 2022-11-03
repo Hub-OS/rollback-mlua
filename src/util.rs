@@ -312,8 +312,8 @@ pub unsafe fn take_gc_userdata<T>(state: *mut ffi::lua_State) -> T {
     lua_inner.drop_ref_index(ud_ref.ref_index);
 
     if lua_inner.memory.is_some() {
-        let mut snapshot = lua_inner.snapshot.borrow_mut();
-        snapshot.ud_recent_destruction.push(ud_ref.destructor_index);
+        let mut destructors = lua_inner.user_data_destructors.borrow_mut();
+        destructors.remove(ud_ref.destructor_index);
     }
 
     ffi::lua_pop(state, 1);

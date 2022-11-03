@@ -51,7 +51,6 @@ pub(crate) struct LuaSnapshot {
     registry_unref_list: Vec<c_int>,
     recent_key_validity: Vec<Arc<(c_int, AtomicBool)>>,
     pub(crate) ud_recent_construction: Vec<GenerationalIndex>,
-    pub(crate) ud_recent_destruction: Vec<GenerationalIndex>,
     pub(crate) ud_pending_destruction: Vec<GenerationalIndex>,
     libs: StdLib,
     modified: bool,
@@ -65,7 +64,6 @@ impl LuaSnapshot {
     fn reset_tracking(&mut self) {
         self.modified = false;
         self.ud_recent_construction.clear();
-        self.ud_recent_destruction.clear();
         self.ud_pending_destruction.clear();
     }
 }
@@ -195,7 +193,6 @@ impl Lua {
                 registry_unref_list: Vec::new(),
                 recent_key_validity: Vec::new(),
                 ud_recent_construction: Vec::new(),
-                ud_recent_destruction: Vec::new(),
                 ud_pending_destruction: Vec::new(),
                 libs: StdLib::NONE,
                 modified: true,
@@ -572,7 +569,6 @@ impl Lua {
         // track user data that hasn't been deleted yet
         let mut current_snapshot = self.snapshot.borrow_mut();
         let mut ud_constructed = mem::take(&mut current_snapshot.ud_recent_construction);
-        let mut ud_destructed = mem::take(&mut current_snapshot.ud_recent_destruction);
         mem::drop(current_snapshot);
 
         if !self.snapshots.is_empty() {
@@ -580,25 +576,16 @@ impl Lua {
 
             for snapshot in self.snapshots.range(start_index as usize..) {
                 ud_constructed.extend(snapshot.ud_recent_construction.iter().cloned());
-                ud_destructed.extend(snapshot.ud_recent_destruction.iter().cloned());
             }
         }
 
         // destructing ud
         let mut destructors = self.user_data_destructors.borrow_mut();
 
-        for index in ud_destructed {
-            // remove from the ud_constructed list if the user data has already been destructed
-            if let Some(i) = ud_constructed.iter().position(|item| *item == index) {
-                ud_constructed.remove(i);
-            }
-
-            destructors.remove(index);
-        }
-
         for index in ud_constructed {
-            let destructor = destructors.remove(index).unwrap();
-            destructor();
+            if let Some(destructor) = destructors.remove(index) {
+                destructor();
+            }
         }
     }
 
