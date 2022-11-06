@@ -457,7 +457,7 @@ where
         cstr!("not enough reference stack space for callback error handling"),
     );
 
-    if let Err(_) = push_gc_userdata(&temp_lua.lua, WrappedFailure::None, true) {
+    if push_gc_userdata(&temp_lua.lua, WrappedFailure::None, true).is_err() {
         ffi::lua_pushnil(state);
         ffi::lua_error(state);
     }

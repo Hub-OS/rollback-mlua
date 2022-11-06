@@ -140,6 +140,7 @@ impl Drop for Lua {
 }
 
 impl Lua {
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         let state = unsafe { ffi::luaL_newstate() };
 
