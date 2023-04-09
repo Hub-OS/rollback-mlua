@@ -134,59 +134,61 @@ impl Memory {
             return;
         }
 
-        // find a left + right neighbor
-        // if there's no neighbors make a new gap
-        let mut left_neighbor = false;
-        let mut right_neighbor = false;
-        let mut insertion_index = 0;
-
         let offset = ptr as usize - self.heap.as_ptr() as usize;
 
-        for (i, gap) in self.gaps.iter().enumerate() {
-            if offset < gap.offset {
-                if offset + osize == gap.offset {
-                    right_neighbor = true;
-                }
+        let Err(insertion_index) = self.gaps.binary_search_by_key(&offset, |gap| gap.offset) else {
+            // the memory is already free?
+            return;
+        };
 
-                break;
+        // finding neighbors to extend or merge gaps
+        let (left_gaps, right_gaps) = self.gaps.split_at_mut(insertion_index);
+        let mut left_gap = left_gaps.last_mut();
+        let mut right_gap = right_gaps.first_mut();
+
+        if let Some(gap) = &left_gap {
+            if gap.offset + gap.size != offset {
+                left_gap = None;
             }
-
-            if offset == gap.offset + gap.size {
-                left_neighbor = true;
-            }
-
-            insertion_index = i + 1;
         }
 
-        if left_neighbor && right_neighbor {
-            // two neighbors, join them
-            let right_gap = &self.gaps[insertion_index];
-            let increase = osize + right_gap.size;
+        if let Some(gap) = &right_gap {
+            if gap.offset != offset + osize {
+                right_gap = None;
+            }
+        }
 
-            let left_gap = &mut self.gaps[insertion_index - 1];
-            left_gap.size += increase;
+        match (left_gap, right_gap) {
+            (Some(left_gap), Some(right_gap)) => {
+                // two neighbors, join them
+                let increase = osize + right_gap.size;
 
-            self.gaps.remove(insertion_index);
-        } else if left_neighbor {
-            // extend left gap
-            let gap = &mut self.gaps[insertion_index - 1];
+                left_gap.size += increase;
 
-            gap.size += osize;
-        } else if right_neighbor {
-            // extend right gap
-            let gap = &mut self.gaps[insertion_index];
+                self.gaps.remove(insertion_index);
+            }
 
-            gap.offset -= osize;
-            gap.size += osize;
-        } else {
-            // no neighbors, make a new gap
-            self.gaps.insert(
-                insertion_index,
-                MemoryGap {
-                    offset,
-                    size: osize,
-                },
-            );
+            (Some(left_gap), None) => {
+                // extend left gap
+                left_gap.size += osize;
+            }
+
+            (None, Some(right_gap)) => {
+                // extend right gap
+                right_gap.offset -= osize;
+                right_gap.size += osize;
+            }
+
+            (None, None) => {
+                // no neighbors, make a new gap
+                self.gaps.insert(
+                    insertion_index,
+                    MemoryGap {
+                        offset,
+                        size: osize,
+                    },
+                );
+            }
         }
     }
 }
@@ -287,5 +289,73 @@ mod tests {
 
         assert_eq!(mem.used_memory(), ALIGNMENT, "freed two chunks");
         assert_eq!(mem.gaps.len(), 1, "continuous memory");
+    }
+
+    #[test]
+    fn left_gap_merge() {
+        let mut mem = Memory::new(TEST_SPACE);
+
+        let left = mem.realloc(std::ptr::null_mut(), 0, 1);
+
+        // free
+        mem.realloc(left, 1, 0);
+
+        assert_eq!(mem.gaps.len(), 1, "continuous memory");
+    }
+
+    #[test]
+    fn right_gap_merge() {
+        let mut mem = Memory::new(TEST_SPACE);
+
+        mem.realloc(std::ptr::null_mut(), 0, TEST_SPACE - ALIGNMENT);
+        let right = mem.realloc(std::ptr::null_mut(), 0, ALIGNMENT);
+
+        assert_eq!(mem.gaps.len(), 0, "no gaps");
+        assert_eq!(mem.used_memory(), TEST_SPACE, "all memory is in use");
+
+        // free
+        mem.realloc(right, 1, 0);
+
+        assert_eq!(mem.gaps.len(), 1, "continuous memory");
+    }
+
+    #[test]
+    fn maintained_order() {
+        let mut mem = Memory::new(TEST_SPACE);
+
+        let left = mem.realloc(std::ptr::null_mut(), 0, ALIGNMENT);
+        mem.realloc(std::ptr::null_mut(), 0, TEST_SPACE - ALIGNMENT * 2);
+        let right = mem.realloc(std::ptr::null_mut(), 0, ALIGNMENT);
+
+        assert_eq!(mem.gaps.len(), 0, "no gaps");
+        assert_eq!(mem.used_memory(), TEST_SPACE, "all memory is in use");
+
+        // free right first
+        mem.realloc(right, 1, 0);
+
+        // free left
+        mem.realloc(left, 1, 0);
+
+        assert!(mem.gaps[0].offset < mem.gaps[1].offset, "order maintained");
+    }
+
+    #[test]
+    fn maintained_order_flipped() {
+        let mut mem = Memory::new(TEST_SPACE);
+
+        let left = mem.realloc(std::ptr::null_mut(), 0, ALIGNMENT);
+        mem.realloc(std::ptr::null_mut(), 0, TEST_SPACE - ALIGNMENT * 2);
+        let right = mem.realloc(std::ptr::null_mut(), 0, ALIGNMENT);
+
+        assert_eq!(mem.gaps.len(), 0, "no gaps");
+        assert_eq!(mem.used_memory(), TEST_SPACE, "all memory is in use");
+
+        // free left first
+        mem.realloc(left, 1, 0);
+
+        // free right
+        mem.realloc(right, 1, 0);
+
+        assert!(mem.gaps[0].offset < mem.gaps[1].offset, "order maintained");
     }
 }
