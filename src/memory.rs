@@ -96,34 +96,16 @@ impl Memory {
             return std::ptr::null_mut();
         }
 
-        let mut closest_size = usize::MAX;
-        let mut best_i: Option<usize> = None;
-
-        for (i, gap) in self.gaps.iter().enumerate() {
-            if size <= gap.size && gap.size < closest_size {
-                best_i = Some(i);
-                closest_size = gap.size;
-
-                if size == gap.size {
-                    break;
-                }
-            }
-        }
-
-        let best_i = match best_i {
-            Some(i) => i,
-            // failed to find space
-            None => return std::ptr::null_mut(),
+        let Some((i, gap)) = self.gaps.iter_mut().enumerate().find(|(_, gap)| gap.size >= size) else {
+            return std::ptr::null_mut()  
         };
-
-        let gap = &mut self.gaps[best_i];
 
         let address = unsafe { self.heap.as_ptr().add(gap.offset) };
         gap.offset += size;
         gap.size -= size;
 
         if gap.size == 0 {
-            self.gaps.remove(best_i);
+            self.gaps.remove(i);
         }
 
         address as *mut c_void
