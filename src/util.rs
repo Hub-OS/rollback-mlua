@@ -449,7 +449,21 @@ where
 
     // We cannot shadow Rust errors with Lua ones, we pre-allocate enough memory
     // to store a wrapped error or panic *before* we proceed.
-    let temp_lua = TempLua::from_state(state);
+    let mut temp_lua = TempLua::from_state(state);
+
+    const RESERVATION_SIZE: usize = 256;
+    let reserved = if let Some(memory) = temp_lua.lua.memory.as_mut() {
+        let reserved = memory.realloc(std::ptr::null_mut(), 0, RESERVATION_SIZE);
+
+        if reserved.is_null() {
+            ffi::lua_pushnil(state);
+            ffi::lua_error(state);
+        }
+
+        reserved
+    } else {
+        std::ptr::null_mut()
+    };
 
     ffi::luaL_checkstack(
         temp_lua.lua.ref_thread,
@@ -457,24 +471,17 @@ where
         cstr!("not enough reference stack space for callback error handling"),
     );
 
-    if push_gc_userdata(&temp_lua.lua, WrappedFailure::None, true).is_err() {
-        ffi::lua_pushnil(state);
-        ffi::lua_error(state);
-    }
-
-    let wrapped_error = get_gc_userdata::<WrappedFailure>(state, -1, ptr::null());
-
-    ffi::lua_rotate(state, 1, 1);
-
     match catch_unwind(AssertUnwindSafe(|| f(nargs))) {
         Ok(Ok(r)) => {
-            // dropping user data to reduce ref_thread usage
-            ffi::lua_rotate(state, 1, -1);
-            take_gc_userdata::<WrappedFailure>(state);
+            // free reserved memory
+            if let Some(memory) = temp_lua.lua.memory.as_mut() {
+                memory.realloc(reserved, RESERVATION_SIZE, 0);
+            }
+
             r
         }
         Ok(Err(err)) => {
-            ffi::lua_settop(state, 1);
+            ffi::lua_settop(state, 0);
 
             // Build `CallbackError` with traceback
             let traceback = if ffi::lua_checkstack(state, ffi::LUA_TRACEBACK_STACK) != 0 {
@@ -486,16 +493,35 @@ where
                 "<not enough stack space for traceback>".to_string()
             };
             let cause = Arc::new(err);
-            ptr::write(
-                wrapped_error,
-                WrappedFailure::Error(Error::CallbackError { traceback, cause }),
-            );
+
+            // free reserved memory
+            if let Some(memory) = temp_lua.lua.memory.as_mut() {
+                memory.realloc(reserved, RESERVATION_SIZE, 0);
+            }
+
+            let failure = WrappedFailure::Error(Error::CallbackError { traceback, cause });
+            if push_gc_userdata(&temp_lua.lua, failure, true).is_err() {
+                // should never occur
+                ffi::lua_pushnil(state);
+            }
 
             ffi::lua_error(state)
         }
         Err(p) => {
-            ffi::lua_settop(state, 1);
-            ptr::write(wrapped_error, WrappedFailure::Panic(Some(p)));
+            ffi::lua_settop(state, 0);
+
+            // free reserved memory
+            if let Some(memory) = temp_lua.lua.memory.as_mut() {
+                memory.realloc(reserved, RESERVATION_SIZE, 0);
+            }
+
+            // create wrapped failure
+            let failure = WrappedFailure::Panic(Some(p));
+            if push_gc_userdata(&temp_lua.lua, failure, true).is_err() {
+                // should never occur
+                ffi::lua_pushnil(state);
+            }
+
             ffi::lua_error(state)
         }
     }
@@ -782,7 +808,6 @@ pub unsafe fn init_error_registry(lua: &Lua) -> Result<()> {
 }
 
 pub(crate) enum WrappedFailure {
-    None,
     Error(Error),
     Panic(Option<Box<dyn Any + Send + 'static>>),
 }
