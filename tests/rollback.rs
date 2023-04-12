@@ -372,3 +372,43 @@ fn test_zero_snapshots() -> rollback_mlua::Result<()> {
 
     Ok(())
 }
+
+#[test]
+fn test_memory_error() -> rollback_mlua::Result<()> {
+    // a bit of a stress test
+    // going from one of the smallest vm sizes to 3x, testing to see if we ever fail to create a WrappedFailure
+
+    let min_memory = {
+        let lua = Lua::new_rollback(20000, 2);
+        lua.used_memory() + 1024 // adding 1024, for some room to create the function
+    };
+
+    for memory_size in min_memory..min_memory * 3 {
+        let lua = Lua::new_rollback(memory_size, 0);
+
+        let func = lua.create_function(|lua, _: ()| -> rollback_mlua::Result<()> {
+            let table_table = lua.create_table()?;
+
+            loop {
+                table_table.push(lua.create_table()?)?;
+            }
+        })?;
+
+        // catch error
+        let res = func.call::<_, ()>(());
+
+        assert!(
+            matches!(
+                res,
+                Err(Error::CallbackError {
+                    traceback: _,
+                    ref cause
+                })
+                if matches!(cause.as_ref(), &Error::MemoryError(_) )
+            ),
+            "{res:?}"
+        );
+    }
+
+    Ok(())
+}
