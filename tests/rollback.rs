@@ -387,7 +387,9 @@ fn test_memory_error() -> rollback_mlua::Result<()> {
         let lua = Lua::new_rollback(memory_size, 0);
 
         let func = lua.create_function(|lua, _: ()| -> rollback_mlua::Result<()> {
+            let globals = lua.globals();
             let table_table = lua.create_table()?;
+            globals.push(table_table.clone())?;
 
             loop {
                 table_table.push(lua.create_table()?)?;
@@ -398,14 +400,14 @@ fn test_memory_error() -> rollback_mlua::Result<()> {
         let res = func.call::<_, ()>(());
 
         assert!(
-            matches!(
-                res,
+            match res {
+                Err(Error::MemoryError(_)) => true,
                 Err(Error::CallbackError {
                     traceback: _,
-                    ref cause
-                })
-                if matches!(cause.as_ref(), &Error::MemoryError(_) )
-            ),
+                    ref cause,
+                }) => matches!(cause.as_ref(), &Error::MemoryError(_)),
+                _ => false,
+            },
             "{res:?}"
         );
     }
