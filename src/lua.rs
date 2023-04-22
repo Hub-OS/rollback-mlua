@@ -1359,13 +1359,16 @@ impl Lua {
     /// }
     /// ```
     #[track_caller]
-    pub fn set_app_data<T: 'static + Send>(&self, data: Rc<T>) {
+    pub fn set_app_data<T: 'static + Send>(&self, data: Rc<T>) -> Option<Rc<T>> {
         let snapshot = self.snapshot.borrow();
-        snapshot
+
+        let old_data = snapshot
             .app_data
             .try_borrow_mut()
             .expect("cannot borrow mutably app data container")
-            .insert(TypeId::of::<T>(), data);
+            .insert(TypeId::of::<T>(), data)?;
+
+        Rc::downcast(old_data).ok()
     }
 
     /// Gets a reference to an application data object stored by [`Lua::set_app_data()`] of type `T`.
@@ -1402,15 +1405,11 @@ impl Lua {
         let snapshot = self.snapshot.borrow();
         let app_data = snapshot.app_data.try_borrow_mut();
 
-        let res = app_data
+        let data = app_data
             .expect("cannot mutably borrow app data container")
-            .remove(&TypeId::of::<T>())
-            .and_then(|rc| Rc::downcast(rc).ok());
+            .remove(&TypeId::of::<T>())?;
 
-        // without this and the let, we get a compiler error for snapshot's lifetime oddly
-        // nll related?
-        std::mem::drop(snapshot);
-        res
+        Rc::downcast(data).ok()
     }
 
     // Uses 2 stack spaces, does not call checkstack
