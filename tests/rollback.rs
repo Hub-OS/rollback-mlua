@@ -32,7 +32,7 @@ impl DropTester {
 
 impl Drop for DropTester {
     fn drop(&mut self) {
-        assert_eq!(self.dropped.load(Ordering::Relaxed), false, "double free");
+        assert!(!self.dropped.load(Ordering::Relaxed), "double free");
 
         self.dropped.store(true, Ordering::Relaxed);
     }
@@ -268,7 +268,7 @@ fn test_function_double_free_safety() -> Result<()> {
         lua.rollback(2);
     }
 
-    assert_eq!(checker.dropped(), true, "should have freed, memory leak");
+    assert!(checker.dropped(), "should have freed, memory leak");
 
     Ok(())
 }
@@ -312,7 +312,7 @@ fn test_scoped_function_double_free_safety() -> Result<()> {
         lua.rollback(2);
     }
 
-    assert_eq!(checker.dropped(), true, "should have freed, memory leak");
+    assert!(checker.dropped(), "should have freed, memory leak");
 
     Ok(())
 }
@@ -368,7 +368,7 @@ fn test_zero_snapshots() -> rollback_mlua::Result<()> {
     lua.gc_collect()?;
 
     // closure shouldve dropped
-    assert_eq!(drop_checker.dropped(), true);
+    assert!(drop_checker.dropped());
 
     Ok(())
 }
