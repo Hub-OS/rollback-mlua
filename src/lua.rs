@@ -16,7 +16,7 @@ use crate::{
 use generational_arena::{Arena, Index as GenerationalIndex};
 use rustc_hash::FxHashMap;
 use std::any::{Any, TypeId};
-use std::cell::{Ref, RefCell};
+use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::ffi::{CStr, CString};
 use std::ops::{Deref, DerefMut};
@@ -1330,7 +1330,7 @@ impl Lua {
 
     /// Sets or replaces an application data object of type `T`.
     ///
-    /// Application data could be accessed at any time by using [`Lua::app_data_ref()`] or [`Lua::app_data_mut()`]
+    /// Application data could be accessed at any time by using [`Lua::app_data()`]
     /// methods where `T` is the data type.
     ///
     /// # Panics
@@ -1359,13 +1359,13 @@ impl Lua {
     /// }
     /// ```
     #[track_caller]
-    pub fn set_app_data<T: 'static + Send>(&self, data: T) {
+    pub fn set_app_data<T: 'static + Send>(&self, data: Rc<T>) {
         let snapshot = self.snapshot.borrow();
         snapshot
             .app_data
             .try_borrow_mut()
             .expect("cannot borrow mutably app data container")
-            .insert(TypeId::of::<T>(), Rc::new(data));
+            .insert(TypeId::of::<T>(), data);
     }
 
     /// Gets a reference to an application data object stored by [`Lua::set_app_data()`] of type `T`.
@@ -1375,7 +1375,7 @@ impl Lua {
     /// Panics if the app data container is currently mutably borrowed. Multiple immutable reads can be
     /// taken out at the same time.
     #[track_caller]
-    pub fn app_data_ref<T: 'static>(&self) -> Option<Ref<T>> {
+    pub fn app_data<T: 'static>(&self) -> Option<Rc<T>> {
         let snapshot = unsafe {
             // should be safe,
             //  - we swap snapshot only during mutable borrows of Lua, other mutations of snapshot are unrelated
@@ -1388,10 +1388,8 @@ impl Lua {
             .try_borrow()
             .expect("cannot borrow app data container");
 
-        Ref::filter_map(app_data, |data| {
-            data.get(&TypeId::of::<T>())?.downcast_ref::<T>()
-        })
-        .ok()
+        let data = app_data.get(&TypeId::of::<T>())?;
+        Rc::downcast(data.clone()).ok()
     }
 
     /// Removes an application data of type `T`.
@@ -1400,13 +1398,19 @@ impl Lua {
     ///
     /// Panics if the app data container is currently borrowed.
     #[track_caller]
-    pub fn remove_app_data<T: 'static>(&self) {
+    pub fn remove_app_data<T: 'static>(&self) -> Option<Rc<T>> {
         let snapshot = self.snapshot.borrow();
-        snapshot
-            .app_data
-            .try_borrow_mut()
+        let app_data = snapshot.app_data.try_borrow_mut();
+
+        let res = app_data
             .expect("cannot mutably borrow app data container")
-            .remove(&TypeId::of::<T>());
+            .remove(&TypeId::of::<T>())
+            .and_then(|rc| Rc::downcast(rc).ok());
+
+        // without this and the let, we get a compiler error for snapshot's lifetime oddly
+        // nll related?
+        std::mem::drop(snapshot);
+        res
     }
 
     // Uses 2 stack spaces, does not call checkstack
