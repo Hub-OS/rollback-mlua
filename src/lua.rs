@@ -48,7 +48,7 @@ pub enum GCMode {
 
 #[derive(Clone)]
 pub(crate) struct LuaSnapshot {
-    app_data: RefCell<FxHashMap<TypeId, Rc<dyn Any + Send>>>,
+    app_data: RefCell<FxHashMap<TypeId, Rc<dyn Any>>>,
     ref_stack_top: c_int,
     ref_stack_size: c_int,
     ref_free: Vec<c_int>,
@@ -1359,7 +1359,7 @@ impl Lua {
     /// }
     /// ```
     #[track_caller]
-    pub fn set_app_data<T: 'static + Send>(&self, data: Rc<T>) -> Option<Rc<T>> {
+    pub fn set_app_data<T: 'static>(&self, data: Rc<T>) -> Option<Rc<T>> {
         let snapshot = self.snapshot.borrow();
 
         let old_data = snapshot
