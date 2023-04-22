@@ -1379,13 +1379,7 @@ impl Lua {
     /// taken out at the same time.
     #[track_caller]
     pub fn app_data<T: 'static>(&self) -> Option<Rc<T>> {
-        let snapshot = unsafe {
-            // should be safe,
-            //  - we swap snapshot only during mutable borrows of Lua, other mutations of snapshot are unrelated
-            //  - app_data has its own RefCell for direct changes
-            self.snapshot.try_borrow_unguarded().unwrap()
-        };
-
+        let snapshot = self.snapshot.borrow();
         let app_data = snapshot
             .app_data
             .try_borrow()
