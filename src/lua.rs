@@ -14,12 +14,15 @@ use crate::{
     StdLib, String, Table, ToLua, ToLuaMulti,
 };
 use generational_arena::{Arena, Index as GenerationalIndex};
-use std::cell::RefCell;
+use rustc_hash::FxHashMap;
+use std::any::{Any, TypeId};
+use std::cell::{Ref, RefCell};
 use std::collections::VecDeque;
 use std::ffi::{CStr, CString};
 use std::ops::{Deref, DerefMut};
 use std::os::raw::{c_char, c_int, c_void};
 use std::panic::Location;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::{mem, ptr};
@@ -45,6 +48,7 @@ pub enum GCMode {
 
 #[derive(Clone)]
 pub(crate) struct LuaSnapshot {
+    app_data: RefCell<FxHashMap<TypeId, Rc<dyn Any + Send>>>,
     ref_stack_top: c_int,
     ref_stack_size: c_int,
     ref_free: Vec<c_int>,
@@ -187,6 +191,7 @@ impl Lua {
             wrapped_failure_mt_ptr: ptr::null(),
             registry_tracker: Arc::new(Mutex::new(RegistryTracker::new())),
             snapshot: RefCell::new(LuaSnapshot {
+                app_data: RefCell::new(FxHashMap::default()),
                 ref_stack_top: unsafe { ffi::lua_gettop(ref_thread) },
                 // We need 1 extra stack space to move values in and out of the ref stack.
                 ref_stack_size: ffi::LUA_MINSTACK - 1,
@@ -1321,6 +1326,87 @@ impl Lua {
                 ffi::luaL_unref(self.state, ffi::LUA_REGISTRYINDEX, id);
             }
         }
+    }
+
+    /// Sets or replaces an application data object of type `T`.
+    ///
+    /// Application data could be accessed at any time by using [`Lua::app_data_ref()`] or [`Lua::app_data_mut()`]
+    /// methods where `T` is the data type.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the app data container is currently borrowed.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rollback_mlua::{Lua, Result};
+    ///
+    /// fn hello(lua: &Lua, _: ()) -> Result<()> {
+    ///     let mut s = lua.app_data_mut::<&str>().unwrap();
+    ///     assert_eq!(*s, "hello");
+    ///     *s = "world";
+    ///     Ok(())
+    /// }
+    ///
+    /// fn main() -> Result<()> {
+    ///     let lua = Lua::new();
+    ///     lua.set_app_data("hello");
+    ///     lua.create_function(hello)?.call(())?;
+    ///     let s = lua.app_data_ref::<&str>().unwrap();
+    ///     assert_eq!(*s, "world");
+    ///     Ok(())
+    /// }
+    /// ```
+    #[track_caller]
+    pub fn set_app_data<T: 'static + Send>(&self, data: T) {
+        let snapshot = self.snapshot.borrow();
+        snapshot
+            .app_data
+            .try_borrow_mut()
+            .expect("cannot borrow mutably app data container")
+            .insert(TypeId::of::<T>(), Rc::new(data));
+    }
+
+    /// Gets a reference to an application data object stored by [`Lua::set_app_data()`] of type `T`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the app data container is currently mutably borrowed. Multiple immutable reads can be
+    /// taken out at the same time.
+    #[track_caller]
+    pub fn app_data_ref<T: 'static>(&self) -> Option<Ref<T>> {
+        let snapshot = unsafe {
+            // should be safe,
+            //  - we swap snapshot only during mutable borrows of Lua, other mutations of snapshot are unrelated
+            //  - app_data has its own RefCell for direct changes
+            self.snapshot.try_borrow_unguarded().unwrap()
+        };
+
+        let app_data = snapshot
+            .app_data
+            .try_borrow()
+            .expect("cannot borrow app data container");
+
+        Ref::filter_map(app_data, |data| {
+            data.get(&TypeId::of::<T>())?.downcast_ref::<T>()
+        })
+        .ok()
+    }
+
+    /// Removes an application data of type `T`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the app data container is currently borrowed.
+    #[track_caller]
+    pub fn remove_app_data<T: 'static>(&self) {
+        let snapshot = self.snapshot.borrow();
+        snapshot
+            .app_data
+            .try_borrow_mut()
+            .expect("cannot mutably borrow app data container")
+            .remove(&TypeId::of::<T>());
     }
 
     // Uses 2 stack spaces, does not call checkstack
