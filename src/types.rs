@@ -2,7 +2,7 @@ use crate::error::Result;
 use crate::ffi;
 use crate::lua::{Lua, LuaInner};
 use crate::value::MultiValue;
-use generational_arena::Index as GenerationalIndex;
+use slotmap::DefaultKey as GenerationalIndex;
 use std::ffi::c_int;
 
 /// Type of Lua integer numbers.

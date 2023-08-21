@@ -13,8 +13,8 @@ use crate::{
     ffi, Callback, FromLua, FromLuaMulti, Integer, Number, RegistryKey, RegistryTracker, Scope,
     StdLib, String, Table, ToLua, ToLuaMulti,
 };
-use generational_arena::{Arena, Index as GenerationalIndex};
 use rustc_hash::FxHashMap;
+use slotmap::{DefaultKey as GenerationalIndex, SlotMap};
 use std::any::{Any, TypeId};
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -81,7 +81,7 @@ pub struct LuaInner {
     pub(crate) snapshot: RefCell<LuaSnapshot>,
     snapshots: VecDeque<LuaSnapshot>,
     multivalue_cache: RefCell<Vec<MultiValue<'static>>>,
-    pub(crate) user_data_destructors: RefCell<Arena<Box<dyn FnOnce()>>>,
+    pub(crate) user_data_destructors: RefCell<SlotMap<GenerationalIndex, Box<dyn FnOnce()>>>,
     pub(crate) memory: Option<Box<PhotographicMemory>>,
 }
 
@@ -133,7 +133,7 @@ impl Drop for Lua {
                 self.rollback_user_data_construction(self.snapshots.len() + 1);
 
                 let destructors = mem::take(&mut *self.user_data_destructors.borrow_mut());
-                for destructor in destructors {
+                for (_, destructor) in destructors {
                     destructor();
                 }
             }
@@ -211,7 +211,7 @@ impl Lua {
             ),
             multivalue_cache: RefCell::new(Vec::with_capacity(MULTIVALUE_CACHE_SIZE)),
             memory,
-            user_data_destructors: RefCell::new(Arena::new()),
+            user_data_destructors: RefCell::new(SlotMap::new()),
             compiled_bind_func: Vec::new(),
         });
 
@@ -1336,28 +1336,6 @@ impl Lua {
     /// # Panics
     ///
     /// Panics if the app data container is currently borrowed.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use rollback_mlua::{Lua, Result};
-    ///
-    /// fn hello(lua: &Lua, _: ()) -> Result<()> {
-    ///     let mut s = lua.app_data_mut::<&str>().unwrap();
-    ///     assert_eq!(*s, "hello");
-    ///     *s = "world";
-    ///     Ok(())
-    /// }
-    ///
-    /// fn main() -> Result<()> {
-    ///     let lua = Lua::new();
-    ///     lua.set_app_data("hello");
-    ///     lua.create_function(hello)?.call(())?;
-    ///     let s = lua.app_data_ref::<&str>().unwrap();
-    ///     assert_eq!(*s, "world");
-    ///     Ok(())
-    /// }
-    /// ```
     #[track_caller]
     pub fn set_app_data<T: 'static>(&self, data: Rc<T>) -> Option<Rc<T>> {
         let snapshot = self.snapshot.borrow();

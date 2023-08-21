@@ -1,6 +1,6 @@
 use crate::lua::LuaInner;
 use crate::types::Callback;
-use generational_arena::Index as GenerationalIndex;
+use slotmap::DefaultKey as GenerationalIndex;
 use std::any::{Any, TypeId};
 use std::ffi::CStr;
 use std::fmt::Write;
@@ -334,7 +334,7 @@ pub unsafe fn push_gc_userdata<T: Any>(lua: &Lua, t: T, protect: bool) -> Result
     let mut ud_destructors = lua.user_data_destructors.borrow_mut();
     let destructor_index = if lua.max_snapshots() == 0 {
         // destructor doesn't need to be stored for non rollback vms
-        GenerationalIndex::from_raw_parts(0, 0)
+        GenerationalIndex::default()
     } else {
         let lua_inner = lua.0;
 
