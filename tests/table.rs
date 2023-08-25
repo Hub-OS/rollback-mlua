@@ -1,7 +1,7 @@
 use rollback_mlua::{Error, Lua, Nil, Result, Table, TableExt, Value};
 
 #[test]
-fn test_set_get() -> Result<()> {
+fn test_globals_set_get() -> Result<()> {
     let lua = Lua::new();
 
     let globals = lua.globals();
@@ -43,6 +43,7 @@ fn test_table() -> Result<()> {
     let table3 = globals.get::<_, Table>("table3")?;
 
     assert_eq!(table1.len()?, 5);
+    assert!(!table1.is_empty());
     assert_eq!(
         table1
             .clone()
@@ -57,8 +58,10 @@ fn test_table() -> Result<()> {
             .collect::<Result<Vec<i64>>>()?,
         vec![1, 2, 3, 4, 5]
     );
+    assert_eq!(table1, [1, 2, 3, 4, 5]);
 
     assert_eq!(table2.len()?, 0);
+    assert!(table2.is_empty());
     assert_eq!(
         table2
             .clone()
@@ -66,12 +69,10 @@ fn test_table() -> Result<()> {
             .collect::<Result<Vec<(i64, i64)>>>()?,
         vec![]
     );
-    assert_eq!(
-        table2.sequence_values().collect::<Result<Vec<i64>>>()?,
-        vec![]
-    );
+    assert_eq!(table2, [0; 0]);
 
     // sequence_values should only iterate until the first border
+    assert_eq!(table3, [1, 2]);
     assert_eq!(
         table3.sequence_values().collect::<Result<Vec<i64>>>()?,
         vec![1, 2]
@@ -116,17 +117,12 @@ fn test_table_push_pop() -> Result<()> {
     // Test raw access
     let table1 = lua.create_sequence_from(vec![123])?;
     table1.raw_push(321)?;
-    assert_eq!(
-        table1
-            .clone()
-            .raw_sequence_values::<i64>()
-            .collect::<Result<Vec<_>>>()?,
-        vec![123, 321]
-    );
+    assert_eq!(table1, [123, 321]);
     assert_eq!(table1.raw_pop::<i64>()?, 321);
     assert_eq!(table1.raw_pop::<i64>()?, 123);
     assert_eq!(table1.raw_pop::<Value>()?, Value::Nil); // An extra pop should do nothing
     assert_eq!(table1.raw_len(), 0);
+    assert_eq!(table1, [0; 0]);
 
     // Test access through metamethods
     let table2 = lua
@@ -144,10 +140,55 @@ fn test_table_push_pop() -> Result<()> {
         .eval::<Table>()?;
     table2.push(345)?;
     assert_eq!(table2.len()?, 2);
+    assert_eq!(
+        table2
+            .clone()
+            .sequence_values::<i64>()
+            .collect::<Result<Vec<_>>>()?,
+        vec![]
+    );
     assert_eq!(table2.pop::<i64>()?, 345);
     assert_eq!(table2.pop::<i64>()?, 234);
     assert_eq!(table2.pop::<Value>()?, Value::Nil);
     assert_eq!(table2.len()?, 0);
+
+    Ok(())
+}
+
+#[test]
+fn test_table_clear() -> Result<()> {
+    let lua = Lua::new();
+
+    let t = lua.create_table()?;
+    // Set array and hash parts
+    t.push("abc")?;
+    t.push("bcd")?;
+    t.set("a", "1")?;
+    t.set("b", "2")?;
+    t.clear()?;
+    assert_eq!(t.len()?, 0);
+    assert_eq!(t.pairs::<Value, Value>().count(), 0);
+
+    // Test table with metamethods
+    let t2 = lua
+        .load(
+            r#"
+        setmetatable({1, 2, 3, a = "1"}, {
+            __index = function() error("index error") end,
+            __newindex = function() error("newindex error") end,
+            __len = function() error("len error") end,
+            __pairs = function() error("pairs error") end,
+        })
+    "#,
+        )
+        .eval::<Table>()?;
+    assert_eq!(t2.raw_len(), 3);
+    assert!(!t2.is_empty());
+    t2.clear()?;
+    assert_eq!(t2.raw_len(), 0);
+    assert!(t2.is_empty());
+    assert_eq!(t2.raw_get::<_, Value>("a")?, Value::Nil);
+    assert_ne!(t2.get_metatable(), None);
 
     Ok(())
 }
@@ -158,29 +199,9 @@ fn test_table_sequence_from() -> Result<()> {
 
     let get_table = lua.create_function(|_, t: Table| Ok(t))?;
 
-    assert_eq!(
-        get_table
-            .call::<_, Table>(vec![1, 2, 3])?
-            .sequence_values()
-            .collect::<Result<Vec<i64>>>()?,
-        vec![1, 2, 3]
-    );
-
-    assert_eq!(
-        get_table
-            .call::<_, Table>([1, 2, 3].as_ref())?
-            .sequence_values()
-            .collect::<Result<Vec<i64>>>()?,
-        vec![1, 2, 3]
-    );
-
-    assert_eq!(
-        get_table
-            .call::<_, Table>([1, 2, 3])?
-            .sequence_values()
-            .collect::<Result<Vec<i64>>>()?,
-        vec![1, 2, 3]
-    );
+    assert_eq!(get_table.call::<_, Table>(vec![1, 2, 3])?, [1, 2, 3]);
+    assert_eq!(get_table.call::<_, Table>([4, 5, 6])?, [4, 5, 6]);
+    assert_eq!(get_table.call::<_, Table>([7, 8, 9].as_slice())?, [7, 8, 9]);
 
     Ok(())
 }
@@ -330,11 +351,8 @@ fn test_table_call() -> Result<()> {
     let table: Table = lua.globals().get("table")?;
 
     assert_eq!(table.call::<_, String>("b")?, "call_2");
-    assert_eq!(table.call_function::<_, _, String>("func", "a")?, "func_a");
-    assert_eq!(
-        table.call_method::<_, _, String>("method", "a")?,
-        "method_1"
-    );
+    assert_eq!(table.call_function::<_, String>("func", "a")?, "func_a");
+    assert_eq!(table.call_method::<_, String>("method", "a")?, "method_1");
 
     // Test calling non-callable table
     let table2 = lua.create_table()?;
@@ -342,6 +360,20 @@ fn test_table_call() -> Result<()> {
         table2.call::<_, ()>(()),
         Err(Error::RuntimeError(_))
     ));
+
+    Ok(())
+}
+
+#[cfg(all(feature = "unstable", not(feature = "send")))]
+#[test]
+fn test_owned_table() -> Result<()> {
+    let lua = Lua::new();
+
+    let table = lua.create_table()?.into_owned();
+    drop(lua);
+
+    table.to_ref().set("abc", 123)?;
+    assert_eq!(table.to_ref().get::<_, i64>("abc")?, 123);
 
     Ok(())
 }

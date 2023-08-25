@@ -4,20 +4,17 @@ use std::io::Result as IoResult;
 use std::path::{Path, PathBuf};
 use std::string::String as StdString;
 
-use crate::error::{Error, Result};
-use crate::ffi;
+use crate::error::{Error, ErrorContext, Result};
 use crate::function::Function;
 use crate::lua::Lua;
-use crate::value::{FromLuaMulti, ToLua, ToLuaMulti, Value};
+use crate::table::Table;
+use crate::value::{FromLuaMulti, IntoLua, IntoLuaMulti};
 
 /// Trait for types [loadable by Lua] and convertible to a [`Chunk`]
 ///
 /// [loadable by Lua]: https://www.lua.org/manual/5.4/manual.html#3.3.2
 /// [`Chunk`]: crate::Chunk
-pub trait AsChunk<'lua> {
-    /// Returns chunk data (can be text or binary)
-    fn source(&self) -> IoResult<Cow<[u8]>>;
-
+pub trait AsChunk<'lua, 'a> {
     /// Returns optional chunk name
     fn name(&self) -> Option<StdString> {
         None
@@ -26,7 +23,8 @@ pub trait AsChunk<'lua> {
     /// Returns optional chunk [environment]
     ///
     /// [environment]: https://www.lua.org/manual/5.4/manual.html#2.2
-    fn env(&self, _lua: &'lua Lua) -> Result<Option<Value<'lua>>> {
+    fn environment(&self, lua: &'lua Lua) -> Result<Option<Table<'lua>>> {
+        let _lua = lua; // suppress warning
         Ok(None)
     }
 
@@ -34,49 +32,64 @@ pub trait AsChunk<'lua> {
     fn mode(&self) -> Option<ChunkMode> {
         None
     }
+
+    /// Returns chunk data (can be text or binary)
+    fn source(self) -> IoResult<Cow<'a, [u8]>>;
 }
 
-impl<'lua> AsChunk<'lua> for str {
-    fn source(&self) -> IoResult<Cow<[u8]>> {
+impl<'a> AsChunk<'_, 'a> for &'a str {
+    fn source(self) -> IoResult<Cow<'a, [u8]>> {
         Ok(Cow::Borrowed(self.as_ref()))
     }
 }
 
-impl<'lua> AsChunk<'lua> for StdString {
-    fn source(&self) -> IoResult<Cow<[u8]>> {
+impl AsChunk<'_, 'static> for StdString {
+    fn source(self) -> IoResult<Cow<'static, [u8]>> {
+        Ok(Cow::Owned(self.into_bytes()))
+    }
+}
+
+impl<'a> AsChunk<'_, 'a> for &'a StdString {
+    fn source(self) -> IoResult<Cow<'a, [u8]>> {
+        Ok(Cow::Borrowed(self.as_bytes()))
+    }
+}
+
+impl<'a> AsChunk<'_, 'a> for &'a [u8] {
+    fn source(self) -> IoResult<Cow<'a, [u8]>> {
+        Ok(Cow::Borrowed(self))
+    }
+}
+
+impl AsChunk<'_, 'static> for Vec<u8> {
+    fn source(self) -> IoResult<Cow<'static, [u8]>> {
+        Ok(Cow::Owned(self))
+    }
+}
+
+impl<'a> AsChunk<'_, 'a> for &'a Vec<u8> {
+    fn source(self) -> IoResult<Cow<'a, [u8]>> {
         Ok(Cow::Borrowed(self.as_ref()))
     }
 }
 
-impl<'lua> AsChunk<'lua> for [u8] {
-    fn source(&self) -> IoResult<Cow<[u8]>> {
-        Ok(Cow::Borrowed(self))
-    }
-}
-
-impl<'lua> AsChunk<'lua> for Vec<u8> {
-    fn source(&self) -> IoResult<Cow<[u8]>> {
-        Ok(Cow::Borrowed(self))
-    }
-}
-
-impl<'lua> AsChunk<'lua> for Path {
-    fn source(&self) -> IoResult<Cow<[u8]>> {
-        std::fs::read(self).map(Cow::Owned)
-    }
-
+impl AsChunk<'_, 'static> for &Path {
     fn name(&self) -> Option<StdString> {
         Some(format!("@{}", self.display()))
     }
-}
 
-impl<'lua> AsChunk<'lua> for PathBuf {
-    fn source(&self) -> IoResult<Cow<[u8]>> {
+    fn source(self) -> IoResult<Cow<'static, [u8]>> {
         std::fs::read(self).map(Cow::Owned)
     }
+}
 
+impl AsChunk<'_, 'static> for PathBuf {
     fn name(&self) -> Option<StdString> {
         Some(format!("@{}", self.display()))
+    }
+
+    fn source(self) -> IoResult<Cow<'static, [u8]>> {
+        std::fs::read(self).map(Cow::Owned)
     }
 }
 
@@ -86,10 +99,10 @@ impl<'lua> AsChunk<'lua> for PathBuf {
 #[must_use = "`Chunk`s do nothing unless one of `exec`, `eval`, `call`, or `into_function` are called on them"]
 pub struct Chunk<'lua, 'a> {
     pub(crate) lua: &'lua Lua,
-    pub(crate) source: IoResult<Cow<'a, [u8]>>,
-    pub(crate) name: Option<StdString>,
-    pub(crate) env: Result<Option<Value<'lua>>>,
+    pub(crate) name: StdString,
+    pub(crate) env: Result<Option<Table<'lua>>>,
     pub(crate) mode: Option<ChunkMode>,
+    pub(crate) source: IoResult<Cow<'a, [u8]>>,
 }
 
 /// Represents chunk mode (text or binary).
@@ -101,16 +114,14 @@ pub enum ChunkMode {
 
 impl<'lua, 'a> Chunk<'lua, 'a> {
     /// Sets the name of this chunk, which results in more informative error traces.
-    pub fn set_name(mut self, name: impl AsRef<str>) -> Result<Self> {
-        self.name = Some(name.as_ref().to_string());
-        // Do extra validation
-        let _ = self.convert_name()?;
-        Ok(self)
+    pub fn set_name(mut self, name: impl Into<String>) -> Self {
+        self.name = name.into();
+        self
     }
 
-    /// Sets the first upvalue (`_ENV`) of the loaded chunk to the given value.
+    /// Sets the environment of the loaded chunk to the given value.
     ///
-    /// Lua main chunks always have exactly one upvalue, and this upvalue is used as the `_ENV`
+    /// In Lua >=5.2 main chunks always have exactly one upvalue, and this upvalue is used as the `_ENV`
     /// variable inside the chunk. By default this value is set to the global environment.
     ///
     /// Calling this method changes the `_ENV` upvalue to the value provided, and variables inside
@@ -119,10 +130,12 @@ impl<'lua, 'a> Chunk<'lua, 'a> {
     /// All global variables (including the standard library!) are looked up in `_ENV`, so it may be
     /// necessary to populate the environment in order for scripts using custom environments to be
     /// useful.
-    pub fn set_environment<V: ToLua<'lua>>(mut self, env: V) -> Result<Self> {
-        // Prefer to propagate errors here and wrap to `Ok`
-        self.env = Ok(Some(env.to_lua(self.lua)?));
-        Ok(self)
+    pub fn set_environment<V: IntoLua<'lua>>(mut self, env: V) -> Self {
+        self.env = env
+            .into_lua(self.lua)
+            .and_then(|val| self.lua.unpack(val))
+            .context("bad environment value");
+        self
     }
 
     /// Sets whether the chunk is text or binary (autodetected by default).
@@ -168,7 +181,7 @@ impl<'lua, 'a> Chunk<'lua, 'a> {
     /// Load the chunk function and call it with the given arguments.
     ///
     /// This is equivalent to `into_function` and calling the resulting function.
-    pub fn call<A: ToLuaMulti<'lua>, R: FromLuaMulti<'lua>>(self, args: A) -> Result<R> {
+    pub fn call<A: IntoLuaMulti<'lua>, R: FromLuaMulti<'lua>>(self, args: A) -> Result<R> {
         self.into_function()?.call(args)
     }
 
@@ -176,9 +189,9 @@ impl<'lua, 'a> Chunk<'lua, 'a> {
     ///
     /// This simply compiles the chunk without actually executing it.
     pub fn into_function(self) -> Result<Function<'lua>> {
-        let name = self.convert_name()?;
+        let name = Self::convert_name(self.name)?;
         self.lua
-            .load_chunk(self.source?.as_ref(), name.as_deref(), self.env?, self.mode)
+            .load_chunk(Some(&name), self.env?, self.mode, self.source?.as_ref())
     }
 
     /// Compiles the chunk and changes mode to binary.
@@ -187,7 +200,7 @@ impl<'lua, 'a> Chunk<'lua, 'a> {
     pub(crate) fn compile(&mut self) {
         if let Ok(ref source) = self.source {
             if self.detect_mode() == ChunkMode::Text {
-                if let Ok(func) = self.lua.load_chunk(source.as_ref(), None, None, None) {
+                if let Ok(func) = self.lua.load_chunk(None, None, None, source.as_ref()) {
                     let data = func.dump(false);
                     self.source = Ok(Cow::Owned(data));
                     self.mode = Some(ChunkMode::Binary);
@@ -199,12 +212,12 @@ impl<'lua, 'a> Chunk<'lua, 'a> {
     fn to_expression(&self) -> Result<Function<'lua>> {
         // We assume that mode is Text
         let source = self.source.as_ref();
-        let source = source.map_err(|err| Error::RuntimeError(err.to_string()))?;
+        let source = source.map_err(Error::runtime)?;
         let source = Self::expression_source(source);
 
-        let name = self.convert_name()?;
+        let name = Self::convert_name(self.name.clone())?;
         self.lua
-            .load_chunk(&source, name.as_deref(), self.env.clone()?, None)
+            .load_chunk(Some(&name), self.env.clone()?, None, &source)
     }
 
     fn detect_mode(&self) -> ChunkMode {
@@ -220,12 +233,8 @@ impl<'lua, 'a> Chunk<'lua, 'a> {
         }
     }
 
-    fn convert_name(&self) -> Result<Option<CString>> {
-        self.name
-            .clone()
-            .map(CString::new)
-            .transpose()
-            .map_err(|err| Error::RuntimeError(format!("invalid name: {err}")))
+    fn convert_name(name: String) -> Result<CString> {
+        CString::new(name).map_err(|err| Error::runtime(format!("invalid name: {err}")))
     }
 
     fn expression_source(source: &[u8]) -> Vec<u8> {

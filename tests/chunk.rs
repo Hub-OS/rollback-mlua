@@ -1,7 +1,7 @@
 use std::fs;
 use std::io;
 
-use rollback_mlua::{Error, Lua, Result};
+use rollback_mlua::{Lua, Result};
 
 #[test]
 fn test_chunk_path() -> Result<()> {
@@ -14,12 +14,11 @@ fn test_chunk_path() -> Result<()> {
         return 321
     "#,
     )?;
-    let i: i32 = lua.load(&temp_dir.path().join("module.lua")).eval()?;
+    let i: i32 = lua.load(&*temp_dir.path().join("module.lua")).eval()?;
     assert_eq!(i, 321);
 
-    match lua.load(&temp_dir.path().join("module2.lua")).exec() {
-        Err(Error::ExternalError(err))
-            if err.downcast_ref::<io::Error>().unwrap().kind() == io::ErrorKind::NotFound => {}
+    match lua.load(&*temp_dir.path().join("module2.lua")).exec() {
+        Err(err) if err.downcast_ref::<io::Error>().unwrap().kind() == io::ErrorKind::NotFound => {}
         res => panic!("expected io::Error, got {:?}", res),
     };
 
@@ -37,12 +36,24 @@ fn test_chunk_macro() -> Result<()> {
     let data = lua.create_table()?;
     data.raw_set("num", 1)?;
 
+    let ud = rollback_mlua::AnyUserData::wrap("hello");
+    let f = rollback_mlua::Function::wrap(|_lua, ()| Ok(()));
+
     lua.globals().set("g", 123)?;
+
+    let string = String::new();
+    let str = string.as_str();
 
     lua.load(rollback_mlua::chunk! {
         assert($name == "Rustacean")
+        assert(type($table) == "table")
         assert($table[1] == 1)
+        assert(type($data) == "table")
         assert($data.num == 1)
+        assert(type($ud) == "userdata")
+        assert(type($f) == "function")
+        assert(type($str) == "string")
+        assert($str == "")
         assert(g == 123)
         s = 321
     })

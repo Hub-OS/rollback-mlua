@@ -96,8 +96,13 @@ impl Memory {
             return std::ptr::null_mut();
         }
 
-        let Some((i, gap)) = self.gaps.iter_mut().enumerate().find(|(_, gap)| gap.size >= size) else {
-            return std::ptr::null_mut()  
+        let Some((i, gap)) = self
+            .gaps
+            .iter_mut()
+            .enumerate()
+            .find(|(_, gap)| gap.size >= size)
+        else {
+            return std::ptr::null_mut();
         };
 
         let address = unsafe { self.heap.as_ptr().add(gap.offset) };

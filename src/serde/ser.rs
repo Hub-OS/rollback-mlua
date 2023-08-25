@@ -1,15 +1,11 @@
-use std::os::raw::c_int;
-
 use serde::{ser, Serialize};
 
 use super::LuaSerdeExt;
 use crate::error::{Error, Result};
-use crate::ffi;
 use crate::lua::Lua;
 use crate::string::String;
 use crate::table::Table;
-use crate::util::{check_stack, StackGuard};
-use crate::value::{ToLua, Value};
+use crate::value::{IntoLua, Value};
 
 /// A struct for serializing Rust values into Lua values.
 #[derive(Debug)]
@@ -29,6 +25,24 @@ pub struct Options {
     ///
     /// [`array_metatable`]: crate::LuaSerdeExt::array_metatable
     pub set_array_metatable: bool,
+
+    /// If true, serialize `None` (part of the `Option` type) to [`null`].
+    /// Otherwise it will be set to Lua [`Nil`].
+    ///
+    /// Default: **true**
+    ///
+    /// [`null`]: crate::LuaSerdeExt::null
+    /// [`Nil`]: crate::Value::Nil
+    pub serialize_none_to_null: bool,
+
+    /// If true, serialize `Unit` (type of `()` in Rust) and Unit structs to [`null`].
+    /// Otherwise it will be set to Lua [`Nil`].
+    ///
+    /// Default: **true**
+    ///
+    /// [`null`]: crate::LuaSerdeExt::null
+    /// [`Nil`]: crate::Value::Nil
+    pub serialize_unit_to_null: bool,
 }
 
 impl Default for Options {
@@ -42,6 +56,8 @@ impl Options {
     pub const fn new() -> Self {
         Options {
             set_array_metatable: true,
+            serialize_none_to_null: true,
+            serialize_unit_to_null: true,
         }
     }
 
@@ -51,6 +67,24 @@ impl Options {
     #[must_use]
     pub const fn set_array_metatable(mut self, enabled: bool) -> Self {
         self.set_array_metatable = enabled;
+        self
+    }
+
+    /// Sets [`serialize_none_to_null`] option.
+    ///
+    /// [`serialize_none_to_null`]: #structfield.serialize_none_to_null
+    #[must_use]
+    pub const fn serialize_none_to_null(mut self, enabled: bool) -> Self {
+        self.serialize_none_to_null = enabled;
+        self
+    }
+
+    /// Sets [`serialize_unit_to_null`] option.
+    ///
+    /// [`serialize_unit_to_null`]: #structfield.serialize_unit_to_null
+    #[must_use]
+    pub const fn serialize_unit_to_null(mut self, enabled: bool) -> Self {
+        self.serialize_unit_to_null = enabled;
         self
     }
 }
@@ -71,7 +105,7 @@ macro_rules! lua_serialize_number {
     ($name:ident, $t:ty) => {
         #[inline]
         fn $name(self, value: $t) -> Result<Value<'lua>> {
-            value.to_lua(self.lua)
+            value.into_lua(self.lua)
         }
     };
 }
@@ -82,9 +116,9 @@ impl<'lua> ser::Serializer for Serializer<'lua> {
 
     // Associated types for keeping track of additional state while serializing
     // compound data structures like sequences and maps.
-    type SerializeSeq = SerializeVec<'lua>;
-    type SerializeTuple = SerializeVec<'lua>;
-    type SerializeTupleStruct = SerializeVec<'lua>;
+    type SerializeSeq = SerializeSeq<'lua>;
+    type SerializeTuple = SerializeSeq<'lua>;
+    type SerializeTupleStruct = SerializeSeq<'lua>;
     type SerializeTupleVariant = SerializeTupleVariant<'lua>;
     type SerializeMap = SerializeMap<'lua>;
     type SerializeStruct = SerializeMap<'lua>;
@@ -126,7 +160,11 @@ impl<'lua> ser::Serializer for Serializer<'lua> {
 
     #[inline]
     fn serialize_none(self) -> Result<Value<'lua>> {
-        Ok(Value::Nil)
+        if self.options.serialize_none_to_null {
+            Ok(self.lua.null())
+        } else {
+            Ok(Value::Nil)
+        }
     }
 
     #[inline]
@@ -139,12 +177,20 @@ impl<'lua> ser::Serializer for Serializer<'lua> {
 
     #[inline]
     fn serialize_unit(self) -> Result<Value<'lua>> {
-        Ok(Value::Nil)
+        if self.options.serialize_unit_to_null {
+            Ok(self.lua.null())
+        } else {
+            Ok(Value::Nil)
+        }
     }
 
     #[inline]
     fn serialize_unit_struct(self, _name: &'static str) -> Result<Value<'lua>> {
-        Ok(Value::Nil)
+        if self.options.serialize_unit_to_null {
+            Ok(self.lua.null())
+        } else {
+            Ok(Value::Nil)
+        }
     }
 
     #[inline]
@@ -185,17 +231,11 @@ impl<'lua> ser::Serializer for Serializer<'lua> {
 
     #[inline]
     fn serialize_seq(self, len: Option<usize>) -> Result<Self::SerializeSeq> {
-        let len = len.unwrap_or(0) as c_int;
-        let table = self.lua.create_table_with_capacity(len, 0)?;
+        let table = self.lua.create_table_with_capacity(len.unwrap_or(0), 0)?;
         if self.options.set_array_metatable {
             table.set_metatable(Some(self.lua.array_metatable()));
         }
-        let options = self.options;
-        Ok(SerializeVec {
-            table,
-            options,
-            len: 0,
-        })
+        Ok(SerializeSeq::new(table, self.options))
     }
 
     #[inline]
@@ -206,9 +246,10 @@ impl<'lua> ser::Serializer for Serializer<'lua> {
     #[inline]
     fn serialize_tuple_struct(
         self,
-        _name: &'static str,
+        name: &'static str,
         len: usize,
     ) -> Result<Self::SerializeTupleStruct> {
+        _ = name;
         self.serialize_seq(Some(len))
     }
 
@@ -229,10 +270,9 @@ impl<'lua> ser::Serializer for Serializer<'lua> {
 
     #[inline]
     fn serialize_map(self, len: Option<usize>) -> Result<Self::SerializeMap> {
-        let len = len.unwrap_or(0) as c_int;
         Ok(SerializeMap {
             key: None,
-            table: self.lua.create_table_with_capacity(0, len)?,
+            table: self.lua.create_table_with_capacity(0, len.unwrap_or(0))?,
             options: self.options,
         })
     }
@@ -252,20 +292,32 @@ impl<'lua> ser::Serializer for Serializer<'lua> {
     ) -> Result<Self::SerializeStructVariant> {
         Ok(SerializeStructVariant {
             name: self.lua.create_string(variant)?,
-            table: self.lua.create_table_with_capacity(0, len as c_int)?,
+            table: self.lua.create_table_with_capacity(0, len)?,
             options: self.options,
         })
     }
 }
 
 #[doc(hidden)]
-pub struct SerializeVec<'lua> {
-    table: Table<'lua>,
+pub struct SerializeSeq<'lua> {
+    lua: &'lua Lua,
+    table: Option<Table<'lua>>,
+    next: usize,
     options: Options,
-    len: i64,
 }
 
-impl<'lua> ser::SerializeSeq for SerializeVec<'lua> {
+impl<'lua> SerializeSeq<'lua> {
+    const fn new(table: Table<'lua>, options: Options) -> Self {
+        Self {
+            lua: table.0.lua,
+            table: Some(table),
+            next: 0,
+            options,
+        }
+    }
+}
+
+impl<'lua> ser::SerializeSeq for SerializeSeq<'lua> {
     type Ok = Value<'lua>;
     type Error = Error;
 
@@ -273,29 +325,19 @@ impl<'lua> ser::SerializeSeq for SerializeVec<'lua> {
     where
         T: Serialize + ?Sized,
     {
-        self.len += 1;
-        let len = self.len;
-
-        let lua = self.table.0.lua;
-        let value = lua.to_value_with(value, self.options)?;
-        unsafe {
-            let _sg = StackGuard::new(lua.state);
-            check_stack(lua.state, 4)?;
-
-            lua.push_ref(&self.table.0);
-            lua.push_value(value)?;
-            protect_lua!(lua.state, 2, 0, |state| {
-                ffi::lua_rawseti(state, -2, len);
-            })
-        }
+        let value = self.lua.to_value_with(value, self.options)?;
+        let table = self.table.as_ref().unwrap();
+        table.raw_seti(self.next + 1, value)?;
+        self.next += 1;
+        Ok(())
     }
 
     fn end(self) -> Result<Value<'lua>> {
-        Ok(Value::Table(self.table))
+        Ok(Value::Table(self.table.unwrap()))
     }
 }
 
-impl<'lua> ser::SerializeTuple for SerializeVec<'lua> {
+impl<'lua> ser::SerializeTuple for SerializeSeq<'lua> {
     type Ok = Value<'lua>;
     type Error = Error;
 
@@ -311,7 +353,7 @@ impl<'lua> ser::SerializeTuple for SerializeVec<'lua> {
     }
 }
 
-impl<'lua> ser::SerializeTupleStruct for SerializeVec<'lua> {
+impl<'lua> ser::SerializeTupleStruct for SerializeSeq<'lua> {
     type Ok = Value<'lua>;
     type Error = Error;
 
@@ -343,9 +385,7 @@ impl<'lua> ser::SerializeTupleVariant for SerializeTupleVariant<'lua> {
         T: Serialize + ?Sized,
     {
         let lua = self.table.0.lua;
-        let idx = self.table.raw_len() + 1;
-        self.table
-            .raw_insert(idx, lua.to_value_with(value, self.options)?)
+        self.table.raw_push(lua.to_value_with(value, self.options)?)
     }
 
     fn end(self) -> Result<Value<'lua>> {

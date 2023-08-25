@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use rollback_mlua::prelude::*;
 
-const ROLLBACK_VM_MEMORY: usize = 1 * 1024 * 1024; // 1 MiB
+const ROLLBACK_VM_MEMORY: usize = 1024 * 1024; // 1 MiB
 
 fn collect_gc_twice(lua: &Lua) {
     lua.gc_collect().unwrap();
@@ -75,6 +75,31 @@ fn create_string_table(c: &mut Criterion) {
                 for &s in &["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"] {
                     let s = lua.create_string(s).unwrap();
                     table.set(s.clone(), s).unwrap();
+                }
+            },
+            BatchSize::SmallInput,
+        );
+    });
+}
+
+fn table_get_set(c: &mut Criterion) {
+    let lua = Lua::new();
+
+    let table = lua.create_table().unwrap();
+
+    c.bench_function("table raw_get and raw_set [10]", |b| {
+        b.iter_batched(
+            || {
+                collect_gc_twice(&lua);
+                table.clear().unwrap();
+            },
+            |_| {
+                for (i, &s) in ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"]
+                    .iter()
+                    .enumerate()
+                {
+                    table.raw_set(s, i).unwrap();
+                    assert_eq!(table.raw_get::<_, usize>(s).unwrap(), i);
                 }
             },
             BatchSize::SmallInput,
@@ -194,6 +219,7 @@ criterion_group! {
         create_table,
         create_array,
         create_string_table,
+        table_get_set,
         create_function,
         call_lua_function,
         call_sum_callback,

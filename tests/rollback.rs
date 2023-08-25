@@ -222,11 +222,11 @@ fn test_named_registry() -> Result<()> {
     lua.snap();
 
     lua.set_named_registry_value("test", "hello")?;
-    assert_eq!(lua.named_registry_value::<_, String>("test")?, "hello");
+    assert_eq!(lua.named_registry_value::<String>("test")?, "hello");
 
     lua.rollback(1);
 
-    assert_eq!(lua.named_registry_value::<_, Value>("test")?, Nil);
+    assert_eq!(lua.named_registry_value::<Value>("test")?, Nil);
 
     Ok(())
 }

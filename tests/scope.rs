@@ -1,7 +1,6 @@
+use rollback_mlua::{Error, Function, Lua, Result, String};
 use std::cell::Cell;
 use std::rc::Rc;
-
-use rollback_mlua::{Error, Function, Lua, Result, String};
 
 #[test]
 fn test_scope_func() -> Result<()> {

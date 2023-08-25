@@ -4,13 +4,12 @@ use std::marker::PhantomData;
 use std::mem;
 
 use crate::error::{Error, Result};
-use crate::ffi;
 use crate::function::Function;
 use crate::lua::Lua;
 use crate::types::{Callback, LuaRef};
 
 use crate::util::{check_stack, take_gc_userdata, StackGuard};
-use crate::value::{FromLuaMulti, ToLuaMulti};
+use crate::value::{FromLuaMulti, IntoLuaMulti};
 
 /// Constructed by the [`Lua::scope`] method, allows temporarily creating Lua userdata and
 /// callbacks that are not required to be Send or 'static.
@@ -18,7 +17,10 @@ use crate::value::{FromLuaMulti, ToLuaMulti};
 /// See [`Lua::scope`] for more details.
 ///
 /// [`Lua::scope`]: crate::Lua.html::scope
-pub struct Scope<'lua, 'scope> {
+pub struct Scope<'lua, 'scope>
+where
+    'lua: 'scope,
+{
     lua: &'lua Lua,
     destructors: RefCell<Vec<(LuaRef<'lua>, DestructorCallback<'lua>)>>,
     _scope_invariant: PhantomData<Cell<&'scope ()>>,
@@ -45,8 +47,8 @@ impl<'lua, 'scope> Scope<'lua, 'scope> {
     pub fn create_function<'callback, A, R, F>(&'callback self, func: F) -> Result<Function<'lua>>
     where
         A: FromLuaMulti<'callback>,
-        R: ToLuaMulti<'callback>,
-        F: 'scope + Fn(&'callback Lua, A) -> Result<R>,
+        R: IntoLuaMulti<'callback>,
+        F: Fn(&'callback Lua, A) -> Result<R> + 'scope,
     {
         // Safe, because 'scope must outlive 'callback (due to Self containing 'scope), however the
         // callback itself must be 'scope lifetime, so the function should not be able to capture
@@ -58,8 +60,9 @@ impl<'lua, 'scope> Scope<'lua, 'scope> {
         // to make sure callbacks can't capture handles with lifetime outside the scope, inside the
         // scope, and owned inside the callback itself.
         unsafe {
-            self.create_callback(Box::new(move |lua, args| {
-                func(lua, A::from_lua_multi(args, lua)?)?.to_lua_multi(lua)
+            self.create_callback(Box::new(move |lua, nargs| {
+                let args = A::from_stack_args(nargs, 1, None, lua)?;
+                func(lua, args)?.push_into_stack_multi(lua)
             }))
         }
     }
@@ -78,8 +81,8 @@ impl<'lua, 'scope> Scope<'lua, 'scope> {
     ) -> Result<Function<'lua>>
     where
         A: FromLuaMulti<'callback>,
-        R: ToLuaMulti<'callback>,
-        F: 'scope + FnMut(&'callback Lua, A) -> Result<R>,
+        R: IntoLuaMulti<'callback>,
+        F: FnMut(&'callback Lua, A) -> Result<R> + 'scope,
     {
         let func = RefCell::new(func);
         self.create_function(move |lua, args| {
@@ -102,7 +105,7 @@ impl<'lua, 'scope> Scope<'lua, 'scope> {
         let f = self.lua.create_callback(f)?;
 
         let destructor: DestructorCallback = Box::new(|f| {
-            let state = f.lua.state;
+            let state = f.lua.state();
             let _sg = StackGuard::new(state);
             check_stack(state, 3).unwrap();
 

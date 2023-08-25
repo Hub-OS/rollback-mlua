@@ -11,9 +11,15 @@ macro_rules! protect_lua {
     };
 
     ($state:expr, $nargs:expr, $nresults:expr, fn($state_inner:ident) $code:expr) => {{
-        unsafe extern "C" fn do_call($state_inner: *mut ffi::lua_State) -> ::std::os::raw::c_int {
+        use ::std::os::raw::c_int;
+        unsafe extern "C-unwind" fn do_call($state_inner: *mut ffi::lua_State) -> c_int {
             $code;
-            $nresults
+            let nresults = $nresults;
+            if nresults == ::ffi::LUA_MULTRET {
+                ffi::lua_gettop($state_inner)
+            } else {
+                nresults
+            }
         }
 
         crate::util::protect_lua_call($state, $nargs, do_call)

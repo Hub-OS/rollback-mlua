@@ -1,3 +1,6 @@
+#![allow(clippy::bool_assert_comparison)]
+#![allow(clippy::mutable_key_type)]
+
 use std::collections::HashMap;
 use std::iter::FromIterator;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -55,7 +58,7 @@ fn test_safety() -> Result<()> {
 fn test_load() -> Result<()> {
     let lua = Lua::new();
 
-    let func = lua.load("return 1+2").into_function()?;
+    let func = lua.load("\treturn 1+2").into_function()?;
     let result: i32 = func.call(())?;
     assert_eq!(result, 3);
 
@@ -259,7 +262,10 @@ fn test_error() -> Result<()> {
             end, 3)
 
             local function handler(err)
-                if string.match(_VERSION, ' 5%.1$') or string.match(_VERSION, ' 5%.2$') or _VERSION == "Luau" then
+                if string.match(_VERSION, " 5%.1$")
+                    or string.match(_VERSION, " 5%.2$")
+                    or string.match(_VERSION, "Luau")
+                then
                     -- Special case for Lua 5.1/5.2 and Luau
                     local caps = string.match(err, ': (%d+)$')
                     if caps then
@@ -289,7 +295,7 @@ fn test_error() -> Result<()> {
     .exec()?;
 
     let rust_error_function =
-        lua.create_function(|_, ()| -> Result<()> { Err(TestError.to_lua_err()) })?;
+        lua.create_function(|_, ()| -> Result<()> { Err(TestError.into_lua_err()) })?;
     globals.set("rust_error_function", rust_error_function)?;
 
     let no_error = globals.get::<_, Function>("no_error")?;
@@ -397,25 +403,32 @@ fn test_result_conversions() -> Result<()> {
 
     let globals = lua.globals();
 
-    let err = lua.create_function(|_, ()| {
-        Ok(Err::<String, _>(
-            "only through failure can we succeed".to_lua_err(),
-        ))
-    })?;
-    let ok = lua.create_function(|_, ()| Ok(Ok::<_, Error>("!".to_owned())))?;
+    let ok = lua.create_function(|_, ()| Ok(Ok::<(), Error>(())))?;
+    let err = lua.create_function(|_, ()| Ok(Err::<(), _>("failure1".into_lua_err())))?;
+    let ok2 = lua.create_function(|_, ()| Ok(Ok::<_, Error>("!".to_owned())))?;
+    let err2 = lua.create_function(|_, ()| Ok(Err::<String, _>("failure2".into_lua_err())))?;
 
-    globals.set("err", err)?;
     globals.set("ok", ok)?;
+    globals.set("ok2", ok2)?;
+    globals.set("err", err)?;
+    globals.set("err2", err2)?;
 
     lua.load(
         r#"
+        local r, e = ok()
+        assert(r == nil and e == nil)
+
         local r, e = err()
         assert(r == nil)
-        assert(tostring(e):find("only through failure can we succeed") ~= nil)
+        assert(tostring(e):find("failure1") ~= nil)
 
-        local r, e = ok()
+        local r, e = ok2()
         assert(r == "!")
         assert(e == nil)
+
+        local r, e = err2()
+        assert(r == nil)
+        assert(tostring(e):find("failure2") ~= nil)
     "#,
     )
     .exec()?;
@@ -583,9 +596,9 @@ fn test_set_metatable_nil() -> Result<()> {
 fn test_named_registry_value() -> Result<()> {
     let lua = Lua::new();
 
-    lua.set_named_registry_value::<_, i32>("test", 42)?;
+    lua.set_named_registry_value::<i32>("test", 42)?;
     let f = lua.create_function(move |lua, ()| {
-        assert_eq!(lua.named_registry_value::<_, i32>("test")?, 42);
+        assert_eq!(lua.named_registry_value::<i32>("test")?, 42);
         Ok(())
     })?;
 
@@ -607,6 +620,17 @@ fn test_replace_registry_value() -> Result<()> {
     let key = lua.create_registry_value::<i32>(42)?;
     lua.replace_registry_value(&key, "new value")?;
     assert_eq!(lua.registry_value::<String>(&key)?, "new value");
+    lua.replace_registry_value(&key, Value::Nil)?;
+    assert_eq!(lua.registry_value::<Value>(&key)?, Value::Nil);
+    lua.replace_registry_value(&key, 123)?;
+    assert_eq!(lua.registry_value::<i32>(&key)?, 123);
+
+    // It should be impossible to replace (initial) nil value with non-nil
+    let key2 = lua.create_registry_value(Value::Nil)?;
+    match lua.replace_registry_value(&key2, "abc") {
+        Err(Error::RuntimeError(_)) => {}
+        r => panic!("expected RuntimeError, got {r:?}"),
+    }
 
     Ok(())
 }
@@ -654,6 +678,28 @@ fn test_mismatched_registry_key() -> Result<()> {
         Err(Error::MismatchedRegistryKey) => {}
         r => panic!("wrong result type for mismatched registry key, {:?}", r),
     };
+
+    Ok(())
+}
+
+#[test]
+fn test_registry_value_reuse() -> Result<()> {
+    let lua = Lua::new();
+
+    let r1 = lua.create_registry_value("value1")?;
+    let r1_slot = format!("{r1:?}");
+    drop(r1);
+
+    // Previous slot must not be reused by nil value
+    let r2 = lua.create_registry_value(Value::Nil)?;
+    let r2_slot = format!("{r2:?}");
+    assert_ne!(r1_slot, r2_slot);
+    drop(r2);
+
+    // But should be reused by non-nil value
+    let r3 = lua.create_registry_value("value3")?;
+    let r3_slot = format!("{r3:?}");
+    assert_eq!(r1_slot, r3_slot);
 
     Ok(())
 }
@@ -737,7 +783,7 @@ fn test_ref_stack_exhaustion() {
     match catch_unwind(AssertUnwindSafe(|| -> Result<()> {
         let lua = Lua::new();
         let mut vals = Vec::new();
-        for _ in 0..1000000 {
+        for _ in 0..10000000 {
             vals.push(lua.create_table()?);
         }
         Ok(())
@@ -818,7 +864,7 @@ fn test_chunk_env() -> Result<()> {
         test_var = 1
     "#,
     )
-    .set_environment(env1.clone())?
+    .set_environment(env1.clone())
     .exec()?;
 
     lua.load(
@@ -827,18 +873,11 @@ fn test_chunk_env() -> Result<()> {
         test_var = 2
     "#,
     )
-    .set_environment(env2.clone())?
+    .set_environment(env2.clone())
     .exec()?;
 
-    assert_eq!(
-        lua.load("test_var").set_environment(env1)?.eval::<i32>()?,
-        1
-    );
-
-    assert_eq!(
-        lua.load("test_var").set_environment(env2)?.eval::<i32>()?,
-        2
-    );
+    assert_eq!(lua.load("test_var").set_environment(env1).eval::<i32>()?, 1);
+    assert_eq!(lua.load("test_var").set_environment(env2).eval::<i32>()?, 2);
 
     Ok(())
 }
@@ -874,7 +913,7 @@ fn test_environment() -> Result<()> {
     env.set("value", 1)?;
     env.set("test", test_1)?;
 
-    lua.load("test()").set_environment(env)?.exec()?;
+    lua.load("test()").set_environment(env).exec()?;
 
     Ok(())
 }
@@ -914,13 +953,48 @@ fn test_load_from_function() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn test_inspect_stack() -> Result<()> {
+    let lua = Lua::new();
+
+    // Not inside any function
+    assert!(lua.inspect_stack(0).is_none());
+    let logline = lua.create_function(|lua, msg: StdString| {
+        let debug = lua.inspect_stack(1).unwrap(); // caller
+        let source = debug.source().short_src;
+        let source = source.as_deref().unwrap_or("?");
+        let line = debug.curr_line();
+        Ok(format!("{}:{} {}", source, line, msg))
+    })?;
+    lua.globals().set("logline", logline)?;
+
+    lua.load(
+        r#"
+        local function foo()
+            local line = logline("hello")
+            return line
+        end
+        local function bar()
+            return foo()
+        end
+
+        assert(foo() == '[string "chunk"]:3 hello')
+        assert(bar() == '[string "chunk"]:3 hello')
+        assert(logline("world") == '[string "chunk"]:12 world')
+    "#,
+    )
+    .set_name("chunk")
+    .exec()?;
+
+    Ok(())
+}
+
 // #[test]
 // fn test_multi_states() -> Result<()> {
 //     let lua = Lua::new();
 //     lua.load_from_std_lib(StdLib::COROUTINE)?;
 
 //     let f = lua.create_function(|_, g: Option<Function>| {
-//         println!("a");
 //         if let Some(g) = g {
 //             g.call(())?;
 //         }
@@ -933,3 +1007,58 @@ fn test_load_from_function() -> Result<()> {
 
 //     Ok(())
 // }
+
+// #[test]
+// #[cfg(feature = "lua54")]
+// fn test_warnings() -> Result<()> {
+//     let lua = Lua::new();
+//     lua.set_app_data::<Vec<(StdString, bool)>>(Vec::new());
+
+//     lua.set_warning_function(|lua, msg, incomplete| {
+//         lua.app_data_mut::<Vec<(StdString, bool)>>()
+//             .unwrap()
+//             .push((msg.to_string(), incomplete));
+//         Ok(())
+//     });
+
+//     lua.warning("native warning ...", true);
+//     lua.warning("finish", false);
+//     lua.warning("\0", false);
+//     lua.load(r#"warn("lua warning", "continue")"#).exec()?;
+
+//     lua.remove_warning_function();
+//     lua.warning("one more warning", false);
+
+//     let messages = lua.app_data_ref::<Vec<(StdString, bool)>>().unwrap();
+//     assert_eq!(
+//         *messages,
+//         vec![
+//             ("native warning ...".to_string(), true),
+//             ("finish".to_string(), false),
+//             ("".to_string(), false),
+//             ("lua warning".to_string(), true),
+//             ("continue".to_string(), false),
+//         ]
+//     );
+
+//     // Trigger error inside warning
+//     lua.set_warning_function(|_, _, _| Err(Error::runtime("warning error")));
+//     assert!(matches!(
+//         lua.load(r#"warn("test")"#).exec(),
+//         Err(Error::CallbackError { cause, .. })
+//             if matches!(*cause, Error::RuntimeError(ref err) if err == "warning error")
+//     ));
+
+//     Ok(())
+// }
+
+#[test]
+#[cfg(feature = "send")]
+fn test_send() {
+    let lua = Lua::new();
+    std::thread::spawn(move || {
+        let _lua = lua;
+    })
+    .join()
+    .unwrap();
+}

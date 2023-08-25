@@ -1,5 +1,3 @@
-#![allow(clippy::wrong_self_convention)]
-
 use std::error::Error as StdError;
 use std::fmt;
 use std::io::Error as IoError;
@@ -8,6 +6,8 @@ use std::result::Result as StdResult;
 use std::str::Utf8Error;
 use std::string::String as StdString;
 use std::sync::Arc;
+
+use crate::private::Sealed;
 
 /// Error type returned by `mlua` methods.
 #[derive(Debug, Clone)]
@@ -47,11 +47,6 @@ pub enum Error {
     /// This error can only happen when Lua state was not created by us and does not have the
     /// custom allocator attached.
     MemoryLimitNotAvailable,
-    /// Main thread is not available.
-    ///
-    /// This error can only happen in Lua5.1/LuaJIT module mode, when module loaded within a coroutine.
-    /// These Lua versions does not have `LUA_RIDX_MAINTHREAD` registry key.
-    MainThreadNotAvailable,
     /// A mutable callback has triggered Lua code that has called the same mutable callback again.
     ///
     /// This is an error because a mutable callback can only be borrowed mutably once.
@@ -69,8 +64,22 @@ pub enum Error {
     /// called with a huge number of arguments, or a rust callback returns a huge number of return
     /// values.
     StackError,
-    /// Too many arguments to `Function::bind`
+    /// Too many arguments to `Function::bind`.
     BindError,
+    /// Bad argument received from Lua (usually when calling a function).
+    ///
+    /// This error can help to identify the argument that caused the error
+    /// (which is stored in the corresponding field).
+    BadArgument {
+        /// Function that was called.
+        to: Option<StdString>,
+        /// Argument position (usually starts from 1).
+        pos: usize,
+        /// Argument name.
+        name: Option<StdString>,
+        /// Underlying error returned when converting argument to a Lua value.
+        cause: Arc<Error>,
+    },
     /// A Rust value could not be converted to a Lua value.
     ToLuaConversionError {
         /// Name of the Rust type that could not be converted.
@@ -116,7 +125,7 @@ pub enum Error {
     ///
     /// [`AnyUserData`]: crate::AnyUserData
     UserDataDestructed,
-    /// An [`AnyUserData`] immutable borrow failed because it is already borrowed mutably.
+    /// An [`AnyUserData`] immutable borrow failed.
     ///
     /// This error can occur when a method on a [`UserData`] type calls back into Lua, which then
     /// tries to call a method on the same [`UserData`] type. Consider restructuring your API to
@@ -125,7 +134,7 @@ pub enum Error {
     /// [`AnyUserData`]: crate::AnyUserData
     /// [`UserData`]: crate::UserData
     UserDataBorrowError,
-    /// An [`AnyUserData`] mutable borrow failed because it is already borrowed.
+    /// An [`AnyUserData`] mutable borrow failed.
     ///
     /// This error can occur when a method on a [`UserData`] type calls back into Lua, which then
     /// tries to call a method on the same [`UserData`] type. Consider restructuring your API to
@@ -142,8 +151,11 @@ pub enum Error {
     ///
     /// [`MetaMethod`]: crate::MetaMethod
     MetaMethodTypeError {
+        /// Name of the metamethod.
         method: StdString,
+        /// Passed value type.
         type_name: &'static str,
+        /// A string containing more detailed error information.
         message: Option<StdString>,
     },
     /// A [`RegistryKey`] produced from a different Lua state was used.
@@ -178,6 +190,13 @@ pub enum Error {
     /// error. The Rust code that originally invoked the Lua code then receives a `CallbackError`,
     /// from which the original error (and a stack traceback) can be recovered.
     ExternalError(Arc<dyn StdError + Send + Sync>),
+    /// An error with additional context.
+    WithContext {
+        /// A string containing additional context.
+        context: StdString,
+        /// Underlying error.
+        cause: Arc<Error>,
+    },
 }
 
 /// A specialized `Result` type used by `mlua`'s API.
@@ -187,23 +206,20 @@ pub type Result<T> = StdResult<T, Error>;
 impl fmt::Display for Error {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
         match *self {
-            Error::SyntaxError { ref message, .. } => write!(fmt, "syntax error: {}", message),
-            Error::RuntimeError(ref msg) => write!(fmt, "runtime error: {}", msg),
+            Error::SyntaxError { ref message, .. } => write!(fmt, "syntax error: {message}"),
+            Error::RuntimeError(ref msg) => write!(fmt, "runtime error: {msg}"),
             Error::MemoryError(ref msg) => {
-                write!(fmt, "memory error: {}", msg)
+                write!(fmt, "memory error: {msg}")
             }
             #[cfg(any(feature = "lua53", feature = "lua52"))]
             Error::GarbageCollectorError(ref msg) => {
-                write!(fmt, "garbage collector error: {}", msg)
+                write!(fmt, "garbage collector error: {msg}")
             }
             Error::SafetyError(ref msg) => {
-                write!(fmt, "safety error: {}", msg)
+                write!(fmt, "safety error: {msg}")
             },
             Error::MemoryLimitNotAvailable => {
                 write!(fmt, "setting memory limit is not available")
-            }
-            Error::MainThreadNotAvailable => {
-                write!(fmt, "main thread is not available in Lua 5.1")
             }
             Error::RecursiveMutCallback => write!(fmt, "mutable callback called recursively"),
             Error::CallbackDestructed => write!(
@@ -218,44 +234,55 @@ impl fmt::Display for Error {
                 fmt,
                 "too many arguments to Function::bind"
             ),
+            Error::BadArgument { ref to, pos, ref name, ref cause } => {
+                if let Some(name) = name {
+                    write!(fmt, "bad argument `{name}`")?;
+                } else {
+                    write!(fmt, "bad argument #{pos}")?;
+                }
+                if let Some(to) = to {
+                    write!(fmt, " to `{to}`")?;
+                }
+                write!(fmt, ": {cause}")
+            },
             Error::ToLuaConversionError { from, to, ref message } => {
-                write!(fmt, "error converting {} to Lua {}", from, to)?;
+                write!(fmt, "error converting {from} to Lua {to}")?;
                 match *message {
                     None => Ok(()),
-                    Some(ref message) => write!(fmt, " ({})", message),
+                    Some(ref message) => write!(fmt, " ({message})"),
                 }
             }
             Error::FromLuaConversionError { from, to, ref message } => {
-                write!(fmt, "error converting Lua {} to {}", from, to)?;
+                write!(fmt, "error converting Lua {from} to {to}")?;
                 match *message {
                     None => Ok(()),
-                    Some(ref message) => write!(fmt, " ({})", message),
+                    Some(ref message) => write!(fmt, " ({message})"),
                 }
             }
             Error::CoroutineInactive => write!(fmt, "cannot resume inactive coroutine"),
             Error::UserDataTypeMismatch => write!(fmt, "userdata is not expected type"),
             Error::UserDataDestructed => write!(fmt, "userdata has been destructed"),
-            Error::UserDataBorrowError => write!(fmt, "userdata already mutably borrowed"),
-            Error::UserDataBorrowMutError => write!(fmt, "userdata already borrowed"),
-            Error::MetaMethodRestricted(ref method) => write!(fmt, "metamethod {} is restricted", method),
+            Error::UserDataBorrowError => write!(fmt, "error borrowing userdata"),
+            Error::UserDataBorrowMutError => write!(fmt, "error mutably borrowing userdata"),
+            Error::MetaMethodRestricted(ref method) => write!(fmt, "metamethod {method} is restricted"),
             Error::MetaMethodTypeError { ref method, type_name, ref message } => {
-                write!(fmt, "metamethod {} has unsupported type {}", method, type_name)?;
+                write!(fmt, "metamethod {method} has unsupported type {type_name}")?;
                 match *message {
                     None => Ok(()),
-                    Some(ref message) => write!(fmt, " ({})", message),
+                    Some(ref message) => write!(fmt, " ({message})"),
                 }
             }
             Error::MismatchedRegistryKey => {
                 write!(fmt, "RegistryKey used from different Lua state")
             }
             Error::CallbackError { ref cause, ref traceback } => {
-                writeln!(fmt, "callback error")?;
                 // Trace errors down to the root
                 let (mut cause, mut full_traceback) = (cause, None);
                 while let Error::CallbackError { cause: ref cause2, traceback: ref traceback2 } = **cause {
                     cause = cause2;
                     full_traceback = Some(traceback2);
                 }
+                writeln!(fmt, "{cause}")?;
                 if let Some(full_traceback) = full_traceback {
                     let traceback = traceback.trim_start_matches("stack traceback:");
                     let traceback = traceback.trim_start().trim_end();
@@ -269,20 +296,24 @@ impl fmt::Display for Error {
                 } else {
                     writeln!(fmt, "{}", traceback.trim_end())?;
                 }
-                write!(fmt, "caused by: {}", cause)
+                Ok(())
             }
             Error::PreviouslyResumedPanic => {
                 write!(fmt, "previously resumed panic returned again")
             }
             #[cfg(feature = "serialize")]
             Error::SerializeError(ref err) => {
-                write!(fmt, "serialize error: {}", err)
+                write!(fmt, "serialize error: {err}")
             },
             #[cfg(feature = "serialize")]
             Error::DeserializeError(ref err) => {
-                write!(fmt, "deserialize error: {}", err)
+                write!(fmt, "deserialize error: {err}")
             },
-            Error::ExternalError(ref err) => write!(fmt, "{}", err),
+            Error::ExternalError(ref err) => write!(fmt, "{err}"),
+            Error::WithContext { ref context, ref cause } => {
+                writeln!(fmt, "{context}")?;
+                write!(fmt, "{cause}")
+            }
         }
     }
 }
@@ -296,53 +327,126 @@ impl StdError for Error {
             // Given that we include source to fmt::Display implementation for `CallbackError`, this call returns nothing.
             Error::CallbackError { .. } => None,
             Error::ExternalError(ref err) => err.source(),
+            Error::WithContext { ref cause, .. } => match cause.as_ref() {
+                Error::ExternalError(err) => err.source(),
+                _ => None,
+            },
             _ => None,
         }
     }
 }
 
 impl Error {
-    pub fn external<T: Into<Box<dyn StdError + Send + Sync>>>(err: T) -> Error {
+    /// Creates a new `RuntimeError` with the given message.
+    #[inline]
+    pub fn runtime<S: fmt::Display>(message: S) -> Self {
+        Error::RuntimeError(message.to_string())
+    }
+
+    /// Wraps an external error object.
+    #[inline]
+    pub fn external<T: Into<Box<dyn StdError + Send + Sync>>>(err: T) -> Self {
         Error::ExternalError(err.into().into())
+    }
+
+    /// Attempts to downcast the external error object to a concrete type by reference.
+    pub fn downcast_ref<T>(&self) -> Option<&T>
+    where
+        T: StdError + 'static,
+    {
+        match self {
+            Error::ExternalError(err) => err.downcast_ref(),
+            Error::WithContext { cause, .. } => match cause.as_ref() {
+                Error::ExternalError(err) => err.downcast_ref(),
+                _ => None,
+            },
+            _ => None,
+        }
     }
 }
 
+/// Trait for converting [`std::error::Error`] into Lua [`Error`].
 pub trait ExternalError {
-    fn to_lua_err(self) -> Error;
+    fn into_lua_err(self) -> Error;
 }
 
 impl<E: Into<Box<dyn StdError + Send + Sync>>> ExternalError for E {
-    fn to_lua_err(self) -> Error {
+    fn into_lua_err(self) -> Error {
         Error::external(self)
     }
 }
 
+/// Trait for converting [`std::result::Result`] into Lua [`Result`].
 pub trait ExternalResult<T> {
-    fn to_lua_err(self) -> Result<T>;
+    fn into_lua_err(self) -> Result<T>;
 }
 
 impl<T, E> ExternalResult<T> for StdResult<T, E>
 where
     E: ExternalError,
 {
-    fn to_lua_err(self) -> Result<T> {
-        self.map_err(|e| e.to_lua_err())
+    fn into_lua_err(self) -> Result<T> {
+        self.map_err(|e| e.into_lua_err())
     }
 }
 
-impl std::convert::From<AddrParseError> for Error {
+/// Provides the `context` method for [`Error`] and `Result<T, Error>`.
+pub trait ErrorContext: Sealed {
+    /// Wraps the error value with additional context.
+    fn context<C: fmt::Display>(self, context: C) -> Self;
+
+    /// Wrap the error value with additional context that is evaluated lazily
+    /// only once an error does occur.
+    fn with_context<C: fmt::Display>(self, f: impl FnOnce(&Error) -> C) -> Self;
+}
+
+impl ErrorContext for Error {
+    fn context<C: fmt::Display>(self, context: C) -> Self {
+        let context = context.to_string();
+        match self {
+            Error::WithContext { cause, .. } => Error::WithContext { context, cause },
+            _ => Error::WithContext {
+                context,
+                cause: Arc::new(self),
+            },
+        }
+    }
+
+    fn with_context<C: fmt::Display>(self, f: impl FnOnce(&Error) -> C) -> Self {
+        let context = f(&self).to_string();
+        match self {
+            Error::WithContext { cause, .. } => Error::WithContext { context, cause },
+            _ => Error::WithContext {
+                context,
+                cause: Arc::new(self),
+            },
+        }
+    }
+}
+
+impl<T> ErrorContext for StdResult<T, Error> {
+    fn context<C: fmt::Display>(self, context: C) -> Self {
+        self.map_err(|err| err.context(context))
+    }
+
+    fn with_context<C: fmt::Display>(self, f: impl FnOnce(&Error) -> C) -> Self {
+        self.map_err(|err| err.with_context(f))
+    }
+}
+
+impl From<AddrParseError> for Error {
     fn from(err: AddrParseError) -> Self {
         Error::external(err)
     }
 }
 
-impl std::convert::From<IoError> for Error {
+impl From<IoError> for Error {
     fn from(err: IoError) -> Self {
         Error::external(err)
     }
 }
 
-impl std::convert::From<Utf8Error> for Error {
+impl From<Utf8Error> for Error {
     fn from(err: Utf8Error) -> Self {
         Error::external(err)
     }

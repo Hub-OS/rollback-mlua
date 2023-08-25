@@ -2,6 +2,7 @@ use std::cell::RefCell;
 use std::convert::TryInto;
 use std::os::raw::c_void;
 use std::rc::Rc;
+use std::result::Result as StdResult;
 use std::string::String as StdString;
 
 use rustc_hash::FxHashSet;
@@ -23,14 +24,14 @@ pub struct Deserializer<'lua> {
 #[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
 pub struct Options {
-    /// If true, an attempt to serialize types such as [`Thread`], [`UserData`], [`LightUserData`]
+    /// If true, an attempt to serialize types such as [`Function`], [`Thread`], [`LightUserData`]
     /// and [`Error`] will cause an error.
     /// Otherwise these types skipped when iterating or serialized as unit type.
     ///
     /// Default: **true**
     ///
+    /// [`Function`]: crate::Function
     /// [`Thread`]: crate::Thread
-    /// [`UserData`]: crate::UserData
     /// [`LightUserData`]: crate::LightUserData
     /// [`Error`]: crate::Error
     pub deny_unsupported_types: bool,
@@ -41,6 +42,11 @@ pub struct Options {
     ///
     /// Default: **true**
     pub deny_recursive_tables: bool,
+
+    /// If true, keys in tables will be iterated in sorted order.
+    ///
+    /// Default: **false**
+    pub sort_keys: bool,
 }
 
 impl Default for Options {
@@ -55,6 +61,7 @@ impl Options {
         Options {
             deny_unsupported_types: true,
             deny_recursive_tables: true,
+            sort_keys: false,
         }
     }
 
@@ -73,6 +80,15 @@ impl Options {
     #[must_use]
     pub const fn deny_recursive_tables(mut self, enabled: bool) -> Self {
         self.deny_recursive_tables = enabled;
+        self
+    }
+
+    /// Sets [`sort_keys`] option.
+    ///
+    /// [`sort_keys`]: #structfield.sort_keys
+    #[must_use]
+    pub const fn sort_keys(mut self, enabled: bool) -> Self {
+        self.sort_keys = enabled;
         self
     }
 }
@@ -114,7 +130,7 @@ impl<'lua, 'de> serde::Deserializer<'de> for Deserializer<'lua> {
         V: de::Visitor<'de>,
     {
         match self.value {
-            Value::Nil => visitor.visit_none(),
+            Value::Nil => visitor.visit_unit(),
             Value::Boolean(b) => visitor.visit_bool(b),
             #[allow(clippy::useless_conversion)]
             Value::Integer(i) => {
@@ -128,12 +144,11 @@ impl<'lua, 'de> serde::Deserializer<'de> for Deserializer<'lua> {
             },
             Value::Table(ref t) if t.raw_len() > 0 || t.is_array() => self.deserialize_seq(visitor),
             Value::Table(_) => self.deserialize_map(visitor),
-            Value::Function(_) | Value::Error(_) => {
+            Value::LightUserData(ud) if ud.0.is_null() => visitor.visit_none(),
+            Value::Function(_) | Value::Thread(_) | Value::LightUserData(_) | Value::Error(_) => {
                 if self.options.deny_unsupported_types {
-                    Err(de::Error::custom(format!(
-                        "unsupported value type `{}`",
-                        self.value.type_name()
-                    )))
+                    let msg = format!("unsupported value type `{}`", self.value.type_name());
+                    Err(de::Error::custom(msg))
                 } else {
                     visitor.visit_unit()
                 }
@@ -148,6 +163,7 @@ impl<'lua, 'de> serde::Deserializer<'de> for Deserializer<'lua> {
     {
         match self.value {
             Value::Nil => visitor.visit_none(),
+            Value::LightUserData(ud) if ud.0.is_null() => visitor.visit_none(),
             _ => visitor.visit_some(self),
         }
     }
@@ -155,7 +171,7 @@ impl<'lua, 'de> serde::Deserializer<'de> for Deserializer<'lua> {
     #[inline]
     fn deserialize_enum<V>(
         self,
-        _name: &str,
+        _name: &'static str,
         _variants: &'static [&'static str],
         visitor: V,
     ) -> Result<V::Value>
@@ -183,7 +199,9 @@ impl<'lua, 'de> serde::Deserializer<'de> for Deserializer<'lua> {
                         &"map with a single key",
                     ));
                 }
-                if check_value_if_skip(&value, self.options, &self.visited)? {
+                let skip = check_value_for_skip(&value, self.options, &self.visited)
+                    .map_err(|err| Error::DeserializeError(err.to_string()))?;
+                if skip {
                     return Err(de::Error::custom("bad enum value"));
                 }
 
@@ -210,9 +228,9 @@ impl<'lua, 'de> serde::Deserializer<'de> for Deserializer<'lua> {
             Value::Table(t) => {
                 let _guard = RecursionGuard::new(&t, &self.visited);
 
-                let len = t.raw_len() as usize;
+                let len = t.raw_len();
                 let mut deserializer = SeqDeserializer {
-                    seq: t.raw_sequence_values_by_len(None),
+                    seq: t.sequence_values(),
                     options: self.options,
                     visited: self.visited,
                 };
@@ -264,7 +282,7 @@ impl<'lua, 'de> serde::Deserializer<'de> for Deserializer<'lua> {
                 let _guard = RecursionGuard::new(&t, &self.visited);
 
                 let mut deserializer = MapDeserializer {
-                    pairs: t.pairs(),
+                    pairs: MapPairs::new(t, self.options.sort_keys)?,
                     value: None,
                     options: self.options,
                     visited: self.visited,
@@ -309,9 +327,31 @@ impl<'lua, 'de> serde::Deserializer<'de> for Deserializer<'lua> {
         visitor.visit_newtype_struct(self)
     }
 
+    #[inline]
+    fn deserialize_unit<V>(self, visitor: V) -> Result<V::Value>
+    where
+        V: de::Visitor<'de>,
+    {
+        match self.value {
+            Value::LightUserData(ud) if ud.0.is_null() => visitor.visit_unit(),
+            _ => self.deserialize_any(visitor),
+        }
+    }
+
+    #[inline]
+    fn deserialize_unit_struct<V>(self, _name: &'static str, visitor: V) -> Result<V::Value>
+    where
+        V: de::Visitor<'de>,
+    {
+        match self.value {
+            Value::LightUserData(ud) if ud.0.is_null() => visitor.visit_unit(),
+            _ => self.deserialize_any(visitor),
+        }
+    }
+
     serde::forward_to_deserialize_any! {
         bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string bytes
-        byte_buf unit unit_struct identifier ignored_any
+        byte_buf identifier ignored_any
     }
 }
 
@@ -332,7 +372,9 @@ impl<'lua, 'de> de::SeqAccess<'de> for SeqDeserializer<'lua> {
             match self.seq.next() {
                 Some(value) => {
                     let value = value?;
-                    if check_value_if_skip(&value, self.options, &self.visited)? {
+                    let skip = check_value_for_skip(&value, self.options, &self.visited)
+                        .map_err(|err| Error::DeserializeError(err.to_string()))?;
+                    if skip {
                         continue;
                     }
                     let visited = Rc::clone(&self.visited);
@@ -352,8 +394,50 @@ impl<'lua, 'de> de::SeqAccess<'de> for SeqDeserializer<'lua> {
     }
 }
 
+pub(crate) enum MapPairs<'lua> {
+    Iter(TablePairs<'lua, Value<'lua>, Value<'lua>>),
+    Vec(Vec<(Value<'lua>, Value<'lua>)>),
+}
+
+impl<'lua> MapPairs<'lua> {
+    pub(crate) fn new(t: Table<'lua>, sort_keys: bool) -> Result<Self> {
+        if sort_keys {
+            let mut pairs = t.pairs::<Value, Value>().collect::<Result<Vec<_>>>()?;
+            pairs.sort_by(|(a, _), (b, _)| b.cmp(a)); // reverse order as we pop values from the end
+            Ok(MapPairs::Vec(pairs))
+        } else {
+            Ok(MapPairs::Iter(t.pairs::<Value, Value>()))
+        }
+    }
+
+    pub(crate) fn count(self) -> usize {
+        match self {
+            MapPairs::Iter(iter) => iter.count(),
+            MapPairs::Vec(vec) => vec.len(),
+        }
+    }
+
+    pub(crate) fn size_hint(&self) -> (usize, Option<usize>) {
+        match self {
+            MapPairs::Iter(iter) => iter.size_hint(),
+            MapPairs::Vec(vec) => (vec.len(), Some(vec.len())),
+        }
+    }
+}
+
+impl<'lua> Iterator for MapPairs<'lua> {
+    type Item = Result<(Value<'lua>, Value<'lua>)>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            MapPairs::Iter(iter) => iter.next(),
+            MapPairs::Vec(vec) => vec.pop().map(Ok),
+        }
+    }
+}
+
 struct MapDeserializer<'lua> {
-    pairs: TablePairs<'lua, Value<'lua>, Value<'lua>>,
+    pairs: MapPairs<'lua>,
     value: Option<Value<'lua>>,
     options: Options,
     visited: Rc<RefCell<FxHashSet<*const c_void>>>,
@@ -371,9 +455,11 @@ impl<'lua, 'de> de::MapAccess<'de> for MapDeserializer<'lua> {
             match self.pairs.next() {
                 Some(item) => {
                     let (key, value) = item?;
-                    if check_value_if_skip(&key, self.options, &self.visited)?
-                        || check_value_if_skip(&value, self.options, &self.visited)?
-                    {
+                    let skip_key = check_value_for_skip(&key, self.options, &self.visited)
+                        .map_err(|err| Error::DeserializeError(err.to_string()))?;
+                    let skip_value = check_value_for_skip(&value, self.options, &self.visited)
+                        .map_err(|err| Error::DeserializeError(err.to_string()))?;
+                    if skip_key || skip_value {
                         continue;
                     }
                     self.processed += 1;
@@ -524,22 +610,24 @@ impl Drop for RecursionGuard {
 }
 
 // Checks `options` and decides should we emit an error or skip next element
-fn check_value_if_skip(
+pub(crate) fn check_value_for_skip(
     value: &Value,
     options: Options,
     visited: &RefCell<FxHashSet<*const c_void>>,
-) -> Result<bool> {
+) -> StdResult<bool, &'static str> {
     match value {
         Value::Table(table) => {
             let ptr = table.to_pointer();
             if visited.borrow().contains(&ptr) {
                 if options.deny_recursive_tables {
-                    return Err(de::Error::custom("recursive table detected"));
+                    return Err("recursive table detected");
                 }
                 return Ok(true); // skip
             }
         }
-        Value::Function(_) | Value::Error(_) if !options.deny_unsupported_types => {
+        Value::Function(_) | Value::Thread(_) | Value::LightUserData(_) | Value::Error(_)
+            if !options.deny_unsupported_types =>
+        {
             return Ok(true); // skip
         }
         _ => {}
