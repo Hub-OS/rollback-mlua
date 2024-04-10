@@ -7,7 +7,6 @@ struct MemoryGap {
 }
 
 // naive allocator
-#[derive(Clone)]
 pub struct Memory {
     heap: Vec<u8>,
     gaps: Vec<MemoryGap>,
@@ -24,9 +23,26 @@ impl Memory {
         }
     }
 
+    pub fn compressed_clone(&self) -> Self {
+        let mut end = self.heap.len();
+
+        if let Some(gap) = self.gaps.last() {
+            if gap.offset + gap.size == self.heap.len() {
+                end = gap.offset
+            }
+        }
+
+        Self {
+            heap: self.heap[..end].to_vec(),
+            gaps: self.gaps.clone(),
+        }
+    }
+
     pub fn copy_from(&mut self, other: &Self) {
         self.gaps = other.gaps.clone();
-        self.heap.copy_from_slice(&other.heap);
+        let slice = &mut self.heap[..other.heap.len()];
+
+        slice.copy_from_slice(&other.heap);
     }
 
     pub fn len(&self) -> usize {

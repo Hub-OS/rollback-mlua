@@ -45,7 +45,8 @@ impl PhotographicMemory {
             self.snapshots.pop_front();
         }
 
-        self.snapshots.push_back(self.active_memory.clone());
+        self.snapshots
+            .push_back(self.active_memory.compressed_clone());
     }
 
     pub fn rollback(&mut self, n: usize) {
