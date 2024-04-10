@@ -19,6 +19,7 @@ Rust does not allow for mutable and immutable references to overlap.
 
 ```rust
 fn main() -> LuaResult<()> {
+    // Create a 1 MiB VM, with storage for one snapshot
     let mut lua = Lua::new_rollback(1024 * 1024, 1);
 
     lua.snap();
@@ -26,10 +27,11 @@ fn main() -> LuaResult<()> {
     let table = lua.create_table()?;
     table.set("value", 1)?;
 
-    // Rollback to before the table was created
+    // Roll back to before the table was created
     lua.rollback(1);
 
-    // Does not compile, lua.rollback() requires mutable reference, table is an immutable reference to lua.
+    // Does not compile, lua.rollback() requires mutable reference,
+    // table is an immutable reference to lua.
     let value = table.get("value")?;
     println!("{}", value);
 
