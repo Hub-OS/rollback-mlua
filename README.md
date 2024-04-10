@@ -86,13 +86,13 @@ fn main() -> LuaResult<()> {
 
     lua.snap();
 
-    // Rollback to a safe point
+    // Roll back to a safe point
     let _: i32 = lua.rollback(1);
 
     // Perfectly valid use
     lua.registry_value(&key)?;
 
-    // Rollback to before the value was created
+    // Roll back to before the value was created
     let _: i32 = lua.rollback(2);
 
     // Returns an Err, as the registry key has been invalidated

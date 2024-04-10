@@ -523,7 +523,7 @@ impl Lua {
         self.rollback_user_data_construction(n);
 
         {
-            // rollback registry tracker
+            // roll back registry tracker
             let state = self.state();
             let mut registry_tracker = self.registry_tracker.lock().expect("unref list poisoned");
 
@@ -563,7 +563,7 @@ impl Lua {
         }
 
         let memory_n = {
-            // rollback memory
+            // roll back memory
             let mut memory_n = self
                 .snapshots
                 .range(index + 1..)
@@ -585,7 +585,7 @@ impl Lua {
         }
 
         {
-            // rollback lua snapshot
+            // roll back lua snapshot
 
             let previous_snapshot = self.snapshots[index].clone();
 
