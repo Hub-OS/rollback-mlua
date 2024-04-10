@@ -13,7 +13,7 @@ Slimmed down [mlua](https://github.com/khvzak/mlua) built for rollback, anything
 
 ## How is safety provided?
 
-lua.snap() and lua.rollback(n) take a mutable reference to lua, other functions are immutable.
+`lua.snap()` and `lua.rollback(n)` take a mutable reference to Lua, other functions are immutable.
 Base mlua has no mutable functions on relevant structs.
 Rust does not allow for mutable and immutable references to overlap.
 
