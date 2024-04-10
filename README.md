@@ -71,7 +71,7 @@ fn main() -> LuaResult<()> {
 ```
 
 Registry keys are the only way to keep a reference to a value past the mutable function line.
-However rolling back to a snapshot
+However rolling back to a snapshot prior to key creation will cause value access to return an `Err`
 
 ```rust
 // a similar test exists for this:
