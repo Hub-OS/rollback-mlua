@@ -72,11 +72,11 @@ Registry keys are the only way to keep a reference to a value past the mutable f
 However rolling back to a snapshot
 
 ```rust
-// a test exists for this:
+// a similar test exists for this:
 // tests/rollback.rs: fn test_registry()
 
 fn main() -> LuaResult<()> {
-    let mut lua = Lua::new_rollback(1024 * 1024, 1);
+    let mut lua = Lua::new_rollback(1024 * 1024, 2);
 
     lua.snap();
 
@@ -85,13 +85,13 @@ fn main() -> LuaResult<()> {
     lua.snap();
 
     // Rollback to a safe point
-    lua.rollback(1);
+    let _: i32 = lua.rollback(1);
 
     // Perfectly valid use
     lua.registry_value(&key)?;
 
     // Rollback to before the value was created
-    lua.rollback(1);
+    let _: i32 = lua.rollback(2);
 
     // Returns an Err, as the registry key has been invalidated
     lua.registry_value(&key)?;
