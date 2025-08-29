@@ -219,7 +219,7 @@ impl<'lua> Function<'lua> {
     /// By default Lua functions shares a global environment.
     ///
     /// This function always returns `None` for Rust/C functions.
-    pub fn environment(&self) -> Option<Table> {
+    pub fn environment(&self) -> Option<Table<'_>> {
         let lua = self.0.lua;
         let state = lua.state();
         unsafe {

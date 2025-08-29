@@ -401,7 +401,7 @@ impl Lua {
         Ok(())
     }
 
-    pub fn environment(&self) -> Result<Table> {
+    pub fn environment(&self) -> Result<Table<'_>> {
         self.snapshot.borrow_mut().mark_modified();
 
         unsafe {
@@ -793,7 +793,7 @@ impl Lua {
     /// function that has called level `n` (except for tail calls, which do not count in the stack).
     ///
     /// [`Debug`]: crate::hook::Debug
-    pub fn inspect_stack(&self, level: usize) -> Option<Debug> {
+    pub fn inspect_stack(&self, level: usize) -> Option<Debug<'_>> {
         unsafe {
             let mut ar: ffi::lua_Debug = mem::zeroed();
             let level = level as c_int;
@@ -1032,7 +1032,7 @@ impl Lua {
     /// Create and return an interned Lua string. Lua strings can be arbitrary [u8] data including
     /// embedded nulls, so in addition to `&str` and `&String`, you can also pass plain `&[u8]`
     /// here.
-    pub fn create_string(&self, s: impl AsRef<[u8]>) -> Result<String> {
+    pub fn create_string(&self, s: impl AsRef<[u8]>) -> Result<String<'_>> {
         let state = self.state();
         unsafe {
             if self.unlikely_memory_error() {
@@ -1048,7 +1048,7 @@ impl Lua {
     }
 
     /// Creates and returns a new empty table.
-    pub fn create_table(&self) -> Result<Table> {
+    pub fn create_table(&self) -> Result<Table<'_>> {
         self.create_table_with_capacity(0, 0)
     }
 
@@ -1056,7 +1056,7 @@ impl Lua {
     /// `narr` is a hint for how many elements the table will have as a sequence;
     /// `nrec` is a hint for how many other elements the table will have.
     /// Lua may use these hints to preallocate memory for the new table.
-    pub fn create_table_with_capacity(&self, narr: usize, nrec: usize) -> Result<Table> {
+    pub fn create_table_with_capacity(&self, narr: usize, nrec: usize) -> Result<Table<'_>> {
         let state = self.state();
         unsafe {
             if self.unlikely_memory_error() {
@@ -1189,7 +1189,7 @@ impl Lua {
     }
 
     /// Returns a handle to the global environment.
-    pub fn globals(&self) -> Table {
+    pub fn globals(&self) -> Table<'_> {
         self.snapshot.borrow_mut().mark_modified();
 
         unsafe {
@@ -1690,7 +1690,7 @@ impl Lua {
     ///
     /// Uses 2 stack spaces, does not call checkstack.
     #[doc(hidden)]
-    pub(crate) unsafe fn pop_value(&self) -> Value {
+    pub(crate) unsafe fn pop_value(&self) -> Value<'_> {
         let state = self.state();
         match ffi::lua_type(state, -1) {
             ffi::LUA_TNIL => {
@@ -1771,7 +1771,7 @@ impl Lua {
     /// Returns value at given stack index without popping it.
     ///
     /// Uses 2 stack spaces, does not call checkstack.
-    pub(crate) unsafe fn stack_value(&self, idx: c_int) -> Value {
+    pub(crate) unsafe fn stack_value(&self, idx: c_int) -> Value<'_> {
         let state = self.state();
         match ffi::lua_type(state, idx) {
             ffi::LUA_TNIL => Nil,
@@ -1860,19 +1860,19 @@ impl Lua {
     // used stack. The implementation is somewhat biased towards the use case of a relatively small
     // number of short term references being created, and `RegistryKey` being used for long term
     // references.
-    pub(crate) unsafe fn pop_ref(&self) -> LuaRef {
+    pub(crate) unsafe fn pop_ref(&self) -> LuaRef<'_> {
         ffi::lua_xmove(self.state(), self.ref_thread(), 1);
         let index = self.ref_stack_pop();
         LuaRef::new(self, index)
     }
 
     // Same as `pop_ref` but assumes the value is already on the reference thread
-    pub(crate) unsafe fn pop_ref_thread(&self) -> LuaRef {
+    pub(crate) unsafe fn pop_ref_thread(&self) -> LuaRef<'_> {
         let index = self.ref_stack_pop();
         LuaRef::new(self, index)
     }
 
-    pub(crate) fn clone_ref(&self, lref: &LuaRef) -> LuaRef {
+    pub(crate) fn clone_ref(&self, lref: &LuaRef) -> LuaRef<'_> {
         unsafe {
             ffi::lua_pushvalue(self.ref_thread(), lref.index);
             let index = self.ref_stack_pop();
@@ -2017,7 +2017,7 @@ impl Lua {
     }
 
     #[inline]
-    pub(crate) fn pop_multivalue_from_pool(&self) -> Option<Vec<Value>> {
+    pub(crate) fn pop_multivalue_from_pool(&self) -> Option<Vec<Value<'_>>> {
         let lua_inner = unsafe { &mut *self.0 };
 
         lua_inner.multivalue_pool.pop()

@@ -303,7 +303,7 @@ impl<'lua> Value<'lua> {
     ///
     /// If the value is a Lua [`String`], returns it or `None` otherwise.
     #[inline]
-    pub fn as_string(&self) -> Option<&String> {
+    pub fn as_string(&self) -> Option<&String<'_>> {
         match self {
             Value::String(s) => Some(s),
             _ => None,
@@ -322,7 +322,7 @@ impl<'lua> Value<'lua> {
     ///
     /// If the value is a Lua [`String`], converts it to [`Cow<str>`] or returns `None` otherwise.
     #[inline]
-    pub fn as_string_lossy(&self) -> Option<Cow<str>> {
+    pub fn as_string_lossy(&self) -> Option<Cow<'_, str>> {
         self.as_string().map(|s| s.to_string_lossy())
     }
 
@@ -336,7 +336,7 @@ impl<'lua> Value<'lua> {
     ///
     /// If the value is a Lua [`Table`], returns it or `None` otherwise.
     #[inline]
-    pub fn as_table(&self) -> Option<&Table> {
+    pub fn as_table(&self) -> Option<&Table<'_>> {
         match self {
             Value::Table(t) => Some(t),
             _ => None,
@@ -353,7 +353,7 @@ impl<'lua> Value<'lua> {
     ///
     /// If the value is a Lua [`Thread`], returns it or `None` otherwise.
     #[inline]
-    pub fn as_thread(&self) -> Option<&Thread> {
+    pub fn as_thread(&self) -> Option<&Thread<'_>> {
         match self {
             Value::Thread(t) => Some(t),
             _ => None,
@@ -370,7 +370,7 @@ impl<'lua> Value<'lua> {
     ///
     /// If the value is a Lua [`Function`], returns it or `None` otherwise.
     #[inline]
-    pub fn as_function(&self) -> Option<&Function> {
+    pub fn as_function(&self) -> Option<&Function<'_>> {
         match self {
             Value::Function(f) => Some(f),
             _ => None,
@@ -805,12 +805,12 @@ impl<'lua> MultiValue<'lua> {
     }
 
     #[inline]
-    pub fn iter(&self) -> iter::Rev<slice::Iter<Value<'lua>>> {
+    pub fn iter(&self) -> iter::Rev<slice::Iter<'_, Value<'lua>>> {
         self.vec.iter().rev()
     }
 
     #[inline]
-    pub(crate) fn drain_all(&mut self) -> iter::Rev<vec::Drain<Value<'lua>>> {
+    pub(crate) fn drain_all(&mut self) -> iter::Rev<vec::Drain<'_, Value<'lua>>> {
         self.vec.drain(..).rev()
     }
 

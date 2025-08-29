@@ -61,7 +61,7 @@ impl<'lua> Debug<'lua> {
     }
 
     /// Corresponds to the `n` what mask.
-    pub fn names(&self) -> DebugNames {
+    pub fn names(&self) -> DebugNames<'_> {
         unsafe {
             assert!(
                 ffi::lua_getinfo(self.lua.state(), cstr!("n"), self.ar.get()) != 0,
@@ -80,7 +80,7 @@ impl<'lua> Debug<'lua> {
     }
 
     /// Corresponds to the `S` what mask.
-    pub fn source(&self) -> DebugSource {
+    pub fn source(&self) -> DebugSource<'_> {
         unsafe {
             assert!(
                 ffi::lua_getinfo(self.lua.state(), cstr!("S"), self.ar.get()) != 0,
