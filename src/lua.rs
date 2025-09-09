@@ -547,10 +547,6 @@ impl Lua {
                 }
             }
 
-            // expecting a clear stack
-            self.gc_collect().unwrap();
-            self.gc_collect().unwrap();
-
             // clearing as these keys have been invalidated
             registry_tracker.recent_key_validity.clear();
 
