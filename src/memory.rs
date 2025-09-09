@@ -39,7 +39,7 @@ impl Memory {
     }
 
     pub fn copy_from(&mut self, other: &Self) {
-        self.gaps = other.gaps.clone();
+        self.gaps.clone_from(&other.gaps);
         let slice = &mut self.heap[..other.heap.len()];
 
         slice.copy_from_slice(&other.heap);
