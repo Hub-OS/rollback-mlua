@@ -1888,7 +1888,15 @@ impl Lua {
             return free;
         }
 
+        // Drop snapshot ref cell in case destructors need it
+        // We collect garbage to make room for growing the auxillary stack
+        std::mem::drop(snapshot);
+        let _ = self.gc_collect();
+        let _ = self.gc_collect();
+
         // Try to grow max stack size
+        let mut snapshot = self.snapshot.borrow_mut();
+
         if snapshot.ref_stack_top >= snapshot.ref_stack_size {
             let mut inc = snapshot.ref_stack_size; // Try to double stack size
             while inc > 0 && ffi::lua_checkstack(self.ref_thread, inc) == 0 {
